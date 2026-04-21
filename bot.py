@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 #   Restrictions : owner only + salon unique
 # ==========================================
 
-TOKEN = "METS_TON_NOUVEAU_TOKEN_ICI"  # ⚠️ Révoque l'ancien token et mets le nouveau ici
+TOKEN = "TOKEN = os.environ.get("TOKEN")"  # ⚠️ Révoque l'ancien token et mets le nouveau ici
 
 OWNER_ID     = 1496251962994331728   # Seul utilisateur autorisé
 SALON_AUTORISE = 1495152917890732172  # Seul salon autorisé
