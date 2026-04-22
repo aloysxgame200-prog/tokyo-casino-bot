@@ -545,14 +545,18 @@ class VueTirage(discord.ui.View):
         embed.set_footer(text=f"Tirages restants : {tirages_restants} • Solde : {user_data['coins']:,} coins")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ✅ FIX : annotations complètes obligatoires pour discord.py
     @discord.ui.button(label="Tirage x1", style=discord.ButtonStyle.primary)
-    async def t1(self, i, b): await self.effectuer_tirages(i, 1)
+    async def t1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.effectuer_tirages(interaction, 1)
 
     @discord.ui.button(label="Tirage x5", style=discord.ButtonStyle.primary)
-    async def t5(self, i, b): await self.effectuer_tirages(i, 5)
+    async def t5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.effectuer_tirages(interaction, 5)
 
     @discord.ui.button(label="Tirage x10", style=discord.ButtonStyle.danger)
-    async def t10(self, i, b): await self.effectuer_tirages(i, 10)
+    async def t10(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.effectuer_tirages(interaction, 10)
 
 
 class VueShop(discord.ui.View):
@@ -587,25 +591,26 @@ class VueShop(discord.ui.View):
             ephemeral=True
         )
 
+    # ✅ FIX : annotations complètes obligatoires pour discord.py
     @discord.ui.button(label="Tirages x10 — 30 000", style=discord.ButtonStyle.primary, emoji="🎲")
-    async def buy_tirages(self, i, b):
-        await self.acheter(i, 30000, "tirages_x10", "🎲 **10 tirages** ajoutés à ton compteur !")
+    async def buy_tirages(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 30000, "tirages_x10", "🎲 **10 tirages** ajoutés à ton compteur !")
 
     @discord.ui.button(label="Pillage x3 — 30 000", style=discord.ButtonStyle.danger, emoji="🗡️")
-    async def buy_pillage(self, i, b):
-        await self.acheter(i, 30000, "pillage_x3", "🗡️ **3 Pillages** obtenus ! Utilise `/tokyo_piller @quelquun`.")
+    async def buy_pillage(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 30000, "pillage_x3", "🗡️ **3 Pillages** obtenus ! Utilise `/tokyo_piller @quelquun`.")
 
     @discord.ui.button(label="XP x100 — 20 000", style=discord.ButtonStyle.success, emoji="✨")
-    async def buy_xp(self, i, b):
-        await self.acheter(i, 20000, "xp_x100", "✨ **XP x100** obtenu !")
+    async def buy_xp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 20000, "xp_x100", "✨ **XP x100** obtenu !")
 
     @discord.ui.button(label="Sabotage x1 — 15 000", style=discord.ButtonStyle.secondary, emoji="🔥")
-    async def buy_sabo(self, i, b):
-        await self.acheter(i, 15000, "sabotage_x1", "🔥 **Sabotage** obtenu ! Utilise `/tokyo_saboter @quelquun`.")
+    async def buy_sabo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 15000, "sabotage_x1", "🔥 **Sabotage** obtenu ! Utilise `/tokyo_saboter @quelquun`.")
 
     @discord.ui.button(label="Souverain des Ombres — 2 000 000", style=discord.ButtonStyle.danger, emoji="👑")
-    async def buy_souverain(self, i, b):
-        await self.acheter(i, 2000000, "souverain", "👑 **Souverain des Ombres** obtenu ! Titre légendaire !")
+    async def buy_souverain(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 2000000, "souverain", "👑 **Souverain des Ombres** obtenu ! Titre légendaire !")
 
 
 # ==========================================
