@@ -7,12 +7,11 @@ from datetime import datetime, timedelta
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
-#   Restrictions : owner only + salon unique
+#   Restriction : salon unique uniquement
 # ==========================================
 
 TOKEN = os.environ.get("TOKEN")
 
-OWNER_ID     = 1022218025539223695   # Seul utilisateur autorisé
 SALON_AUTORISE = 1495152917890732172  # Seul salon autorisé
 
 intents = discord.Intents.default()
@@ -22,20 +21,13 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==========================================
-#   VÉRIFICATIONS GLOBALES
+#   VÉRIFICATION SALON
 # ==========================================
 
-async def check_acces(interaction: discord.Interaction) -> bool:
-    """Vérifie que l'utilisateur est le owner ET que la commande est dans le bon salon."""
-    if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message(
-            "❌ Tu n'es pas autorisé à utiliser ce bot.",
-            ephemeral=True
-        )
-        return False
+async def check_salon(interaction: discord.Interaction) -> bool:
     if interaction.channel_id != SALON_AUTORISE:
         await interaction.response.send_message(
-            f"❌ Ce bot ne fonctionne que dans le salon <#{SALON_AUTORISE}>.",
+            f"❌ Ce bot fonctionne uniquement dans <#{SALON_AUTORISE}> !",
             ephemeral=True
         )
         return False
@@ -202,10 +194,7 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str):
         )
     elif categorie == "xp":
         user_data["xp_boosts"] = user_data.get("xp_boosts", 0) + 1
-        msg = (
-            "✨ **XP x50** obtenu !\n"
-            "└ Gardé dans ton inventaire. Utilisable si ton serveur a un bot de niveaux."
-        )
+        msg = "✨ **XP x50** obtenu !\n└ Gardé dans ton inventaire."
     else:
         msg = "❓ Résultat inconnu."
 
@@ -230,7 +219,7 @@ async def on_ready():
 
 @bot.tree.command(name="tokyo", description="🎰 Ouvre le menu du Tokyo FR Casino")
 async def tokyo(interaction: discord.Interaction):
-    if not await check_acces(interaction):
+    if not await check_salon(interaction):
         return
 
     user = get_user(str(interaction.user.id))
@@ -249,15 +238,15 @@ async def tokyo(interaction: discord.Interaction):
     )
     embed.set_footer(text="3 tirages gratuits par jour • Remis à zéro à minuit")
     await interaction.response.send_message(embed=embed, view=MenuPrincipal(), ephemeral=False)
+
 # ==========================================
 #   /tokyo_piller
 # ==========================================
 
 @bot.tree.command(name="tokyo_piller", description="🗡️ Vole des coins à un membre (nécessite un Pillage)")
 async def piller(interaction: discord.Interaction, cible: discord.Member):
-    if not await check_acces(interaction):
+    if not await check_salon(interaction):
         return
-
     if cible.id == interaction.user.id:
         await interaction.response.send_message("❌ Tu ne peux pas te piller toi-même !", ephemeral=True)
         return
@@ -320,9 +309,8 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
 
 @bot.tree.command(name="tokyo_saboter", description="🔥 Bloque les tirages d'un membre 24h (nécessite un Sabotage)")
 async def saboter(interaction: discord.Interaction, cible: discord.Member):
-    if not await check_acces(interaction):
+    if not await check_salon(interaction):
         return
-
     if cible.id == interaction.user.id:
         await interaction.response.send_message("❌ Tu ne peux pas te saboter toi-même !", ephemeral=True)
         return
@@ -383,8 +371,6 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Profil", style=discord.ButtonStyle.secondary, emoji="💰")
     async def profil(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_acces(interaction):
-            return
         user = get_user(str(interaction.user.id))
         tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
         icones = user.get("icones", [])
@@ -408,8 +394,6 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Tirage", style=discord.ButtonStyle.primary, emoji="🎲")
     async def tirage(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_acces(interaction):
-            return
         user = get_user(str(interaction.user.id))
         tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
         embed = discord.Embed(title="🎲 Tirages", color=0xFF8C00)
@@ -427,8 +411,6 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Shop", style=discord.ButtonStyle.success, emoji="🏪")
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_acces(interaction):
-            return
         user = get_user(str(interaction.user.id))
         embed = discord.Embed(title="🏪 Boutique du Casino", color=0x2ECC71)
         embed.description = (
@@ -448,8 +430,6 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Collection", style=discord.ButtonStyle.secondary, emoji="🖼️")
     async def collection(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_acces(interaction):
-            return
         user = get_user(str(interaction.user.id))
         icones = user.get("icones", [])
         embed = discord.Embed(title="🖼️ Ta Collection d'Icônes", color=0x9B59B6)
@@ -476,8 +456,6 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Succès", style=discord.ButtonStyle.secondary, emoji="🏆")
     async def succes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_acces(interaction):
-            return
         user = get_user(str(interaction.user.id))
         embed = discord.Embed(title="🏆 Succès", color=0xF1C40F)
         embed.description = "✅ = débloqué  •  🔒 = pas encore obtenu"
@@ -504,9 +482,6 @@ class VueTirage(discord.ui.View):
         super().__init__(timeout=60)
 
     async def effectuer_tirages(self, interaction: discord.Interaction, nb: int):
-        if not await check_acces(interaction):
-            return
-
         user_data = get_user(str(interaction.user.id))
 
         if est_sabote(user_data):
@@ -585,8 +560,6 @@ class VueShop(discord.ui.View):
         super().__init__(timeout=120)
 
     async def acheter(self, interaction: discord.Interaction, prix: int, item: str, description: str):
-        if not await check_acces(interaction):
-            return
         user_data = get_user(str(interaction.user.id))
         if user_data["coins"] < prix:
             manque = prix - user_data["coins"]
@@ -642,8 +615,6 @@ class VueShop(discord.ui.View):
 @bot.tree.command(name="tokyo_admin_coins", description="[ADMIN] Donner des Tokyo Coins à un membre")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def admin_coins(interaction: discord.Interaction, membre: discord.Member, montant: int):
-    if not await check_acces(interaction):
-        return
     user_data = get_user(str(membre.id))
     user_data["coins"] += montant
     save_user(str(membre.id), user_data)
@@ -655,8 +626,6 @@ async def admin_coins(interaction: discord.Interaction, membre: discord.Member, 
 @bot.tree.command(name="tokyo_admin_tirages", description="[ADMIN] Donner des tirages à un membre")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def admin_tirages(interaction: discord.Interaction, membre: discord.Member, nb: int):
-    if not await check_acces(interaction):
-        return
     user_data = get_user(str(membre.id))
     user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + nb
     save_user(str(membre.id), user_data)
@@ -668,8 +637,6 @@ async def admin_tirages(interaction: discord.Interaction, membre: discord.Member
 @bot.tree.command(name="tokyo_admin_reset_tirages", description="[ADMIN] Remet les tirages gratuits à 3 pour tout le monde")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def admin_reset(interaction: discord.Interaction):
-    if not await check_acces(interaction):
-        return
     db = load_db()
     for uid in db:
         db[uid]["tirages"] = 3
@@ -678,8 +645,6 @@ async def admin_reset(interaction: discord.Interaction):
 
 @bot.tree.command(name="tokyo_classement", description="🏆 Voir le top 10 des Tokyo Coins")
 async def classement(interaction: discord.Interaction):
-    if not await check_acces(interaction):
-        return
     db = load_db()
     if not db:
         await interaction.response.send_message("Aucun joueur enregistré.", ephemeral=True)
