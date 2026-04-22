@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 TOKEN = os.environ.get("TOKEN")
 
 SALON_AUTORISE = 1495152917890732172  # Seul salon autorisé
+OWNER_ID = 1022218025539223695        # ID du proprio pour les alertes Nitro
 
 intents = discord.Intents.default()
 intents.members = True
@@ -99,7 +100,6 @@ def get_user(user_id: str):
             "succes": ["Bienvenue"],
             "pillages": 0,
             "sabotages": 0,
-            "xp_boosts": 0,
             "pillages_total": 0,
             "sabotages_total": 0,
             "sabote_jusqu": None,
@@ -135,7 +135,6 @@ TIRAGES_TABLE = (
         ("Pillage",       5.00, "pillage"),
         ("Tirages x5",    4.00, "tirages"),
         ("Sabotage",      2.00, "sabotage"),
-        ("XP x50",        5.00, "xp"),
     ]
 )
 
@@ -192,9 +191,6 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str):
             "🔥 **Sabotage** obtenu !\n"
             "└ Utilise `/tokyo_saboter @quelquun` pour bloquer tous ses tirages pendant **24 heures**."
         )
-    elif categorie == "xp":
-        user_data["xp_boosts"] = user_data.get("xp_boosts", 0) + 1
-        msg = "✨ **XP x50** obtenu !\n└ Gardé dans ton inventaire."
     else:
         msg = "❓ Résultat inconnu."
 
@@ -381,7 +377,6 @@ class MenuPrincipal(discord.ui.View):
         embed.add_field(name="Icônes", value=f"**{len(icones)}** collectionnées 🖼️", inline=True)
         embed.add_field(name="Pillages", value=f"**{user.get('pillages', 0)}** 🗡️", inline=True)
         embed.add_field(name="Sabotages", value=f"**{user.get('sabotages', 0)}** 🔥", inline=True)
-        embed.add_field(name="XP Boosts", value=f"**{user.get('xp_boosts', 0)}** ✨", inline=True)
 
         if icones:
             apercu = "  ".join(icones[-10:])
@@ -401,7 +396,7 @@ class MenuPrincipal(discord.ui.View):
             "**Comment ça marche ?**\n"
             "Chaque tirage te donne un résultat aléatoire :\n"
             "🖼️ Icônes à collectionner • 💰 Coins\n"
-            "🗡️ Pillage • 🔥 Sabotage • 🎲 Tirages bonus • ✨ XP\n\n"
+            "🗡️ Pillage • 🔥 Sabotage • 🎲 Tirages bonus\n\n"
             "**Les icônes ont 5 niveaux de rareté :**\n"
             "⬜ Commun • 🟦 Peu commun • 🟣 Rare • 🟡 Épique • 🔴 Légendaire\n\n"
             f"Tu as **{tirages_dispo} tirage(s)** disponible(s).\n"
@@ -419,12 +414,10 @@ class MenuPrincipal(discord.ui.View):
             "└ Ajoute 10 tirages à ton compteur\n\n"
             "🗡️ **Pillage x3** — 30 000 coins\n"
             "└ Pour voler des coins à d'autres membres avec `/tokyo_piller`\n\n"
-            "✨ **XP x100** — 20 000 coins\n"
-            "└ Donne 100 XP à un membre du serveur\n\n"
             "🔥 **Sabotage x1** — 15 000 coins\n"
             "└ Bloque les tirages de quelqu'un 24h avec `/tokyo_saboter`\n\n"
-            "👑 **Souverain des Ombres** — 2 000 000 coins\n"
-            "└ Titre légendaire ultra-rare affiché dans ton profil"
+            "💎 **Discord Nitro** — 2 000 000 coins\n"
+            "└ Un vrai Discord Nitro offert par l'admin ! 🎉"
         )
         await interaction.response.send_message(embed=embed, view=VueShop(), ephemeral=True)
 
@@ -545,7 +538,6 @@ class VueTirage(discord.ui.View):
         embed.set_footer(text=f"Tirages restants : {tirages_restants} • Solde : {user_data['coins']:,} coins")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ✅ FIX : annotations complètes obligatoires pour discord.py
     @discord.ui.button(label="Tirage x1", style=discord.ButtonStyle.primary)
     async def t1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.effectuer_tirages(interaction, 1)
@@ -578,20 +570,24 @@ class VueShop(discord.ui.View):
             user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + 10
         elif item == "pillage_x3":
             user_data["pillages"] = user_data.get("pillages", 0) + 3
-        elif item == "xp_x100":
-            user_data["xp_boosts"] = user_data.get("xp_boosts", 0) + 1
         elif item == "sabotage_x1":
             user_data["sabotages"] = user_data.get("sabotages", 0) + 1
-        elif item == "souverain":
-            if "Souverain des Ombres" not in user_data["succes"]:
-                user_data["succes"].append("Souverain des Ombres")
+        elif item == "nitro":
+            try:
+                owner = await bot.fetch_user(OWNER_ID)
+                await owner.send(
+                    f"💎 **ACHAT NITRO !**\n"
+                    f"**{interaction.user.display_name}** (`{interaction.user.id}`) vient d'acheter un **Discord Nitro** avec 2 000 000 coins !\n"
+                    f"Envoie-lui son Nitro dès que possible. 🎉"
+                )
+            except Exception as e:
+                print(f"Erreur MP owner : {e}")
         save_user(str(interaction.user.id), user_data)
         await interaction.response.send_message(
             f"✅ Achat réussi !\n{description}\n\n💰 Solde restant : **{user_data['coins']:,} coins**",
             ephemeral=True
         )
 
-    # ✅ FIX : annotations complètes obligatoires pour discord.py
     @discord.ui.button(label="Tirages x10 — 30 000", style=discord.ButtonStyle.primary, emoji="🎲")
     async def buy_tirages(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.acheter(interaction, 30000, "tirages_x10", "🎲 **10 tirages** ajoutés à ton compteur !")
@@ -600,17 +596,13 @@ class VueShop(discord.ui.View):
     async def buy_pillage(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.acheter(interaction, 30000, "pillage_x3", "🗡️ **3 Pillages** obtenus ! Utilise `/tokyo_piller @quelquun`.")
 
-    @discord.ui.button(label="XP x100 — 20 000", style=discord.ButtonStyle.success, emoji="✨")
-    async def buy_xp(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.acheter(interaction, 20000, "xp_x100", "✨ **XP x100** obtenu !")
-
     @discord.ui.button(label="Sabotage x1 — 15 000", style=discord.ButtonStyle.secondary, emoji="🔥")
     async def buy_sabo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.acheter(interaction, 15000, "sabotage_x1", "🔥 **Sabotage** obtenu ! Utilise `/tokyo_saboter @quelquun`.")
 
-    @discord.ui.button(label="Souverain des Ombres — 2 000 000", style=discord.ButtonStyle.danger, emoji="👑")
-    async def buy_souverain(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.acheter(interaction, 2000000, "souverain", "👑 **Souverain des Ombres** obtenu ! Titre légendaire !")
+    @discord.ui.button(label="Discord Nitro — 2 000 000", style=discord.ButtonStyle.danger, emoji="💎")
+    async def buy_nitro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 2000000, "nitro", "💎 **Discord Nitro** acheté ! L'admin va te l'envoyer très bientôt. 🎉")
 
 
 # ==========================================
@@ -673,3 +665,4 @@ async def classement(interaction: discord.Interaction):
 
 
 bot.run(TOKEN)
+
