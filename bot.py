@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 TOKEN = os.environ.get("TOKEN")
 
-OWNER_ID     = 1496251962994331728   # Seul utilisateur autorisé
+OWNER_ID     = 1022218025539223695   # Seul utilisateur autorisé
 SALON_AUTORISE = 1495152917890732172  # Seul salon autorisé
 
 intents = discord.Intents.default()
