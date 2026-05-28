@@ -5,6 +5,8 @@ import os
 import random
 import pytz
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer  # ← AJOUTE
+import threading                                             # ← AJOUTE
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
@@ -752,6 +754,6 @@ def run_web():
     server = HTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
 
-Thread(target=run_web, daemon=True).start()
+threading.Thread(target=run_web, daemon=True).start()
 
 bot.run(TOKEN)
