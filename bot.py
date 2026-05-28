@@ -737,6 +737,21 @@ async def classement(interaction: discord.Interaction):
         )
 
     await interaction.response.send_message(embed=embed)
+# ==========================================
+#   SERVEUR WEB POUR RENDER / UPTIMEROBOT
+# ==========================================
 
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot en ligne !")
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever()
+
+Thread(target=run_web, daemon=True).start()
 
 bot.run(TOKEN)
