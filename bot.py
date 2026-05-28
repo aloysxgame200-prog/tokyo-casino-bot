@@ -347,7 +347,7 @@ async def tokyo(interaction: discord.Interaction):
         "**🏆 Succès** — Tes objectifs"
     )
     embed.set_footer(text="3 tirages gratuits par jour • Remis à zéro à minuit (heure de Paris)")
-    await interaction.response.send_message(embed=embed, view=MenuPrincipal(), ephemeral=False)
+    await interaction.response.send_message(embed=embed, view=MenuPrincipal(), ephemeral=True)
 
 # ==========================================
 #   /tokyo_piller
