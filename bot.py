@@ -1,9 +1,28 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 import os
 import random
 from datetime import datetime, timedelta
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# ==========================================
+#   SERVEUR HTTP — nécessaire pour Render
+# ==========================================
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+    def log_message(self, format, *args):
+        pass  # Désactive les logs HTTP inutiles
+
+def run_http():
+    HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+
+Thread(target=run_http, daemon=True).start()
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
@@ -12,8 +31,8 @@ from datetime import datetime, timedelta
 
 TOKEN = os.environ.get("TOKEN")
 
-SALON_AUTORISE = 1495152917890732172  # Seul salon autorisé
-OWNER_ID = 1022218025539223695        # ID du proprio pour les alertes Nitro
+SALON_AUTORISE = 1495152917890732172
+OWNER_ID = 1022218025539223695
 
 intents = discord.Intents.default()
 intents.members = True
@@ -39,29 +58,29 @@ async def check_salon(interaction: discord.Interaction) -> bool:
 # ==========================================
 
 ICONES = {
-    "🌸 Sakura":        ("commun",     15.00),
-    "⭐ Étoile":        ("commun",     12.00),
-    "🌙 Lune":          ("commun",     10.00),
-    "🔥 Flamme":        ("commun",      8.00),
-    "💫 Étincelle":     ("commun",      8.00),
-    "🐉 Dragon":        ("peu_commun",  4.00),
-    "⚡ Foudre":        ("peu_commun",  3.00),
-    "🌊 Vague":         ("peu_commun",  3.00),
-    "🗡️ Katana":       ("peu_commun",  2.50),
-    "🦊 Renard":        ("peu_commun",  2.00),
-    "💎 Diamant":       ("rare",        1.00),
-    "🌺 Fleur de Cerisier": ("rare",    0.80),
-    "🦋 Papillon Noir": ("rare",        0.60),
-    "⚜️ Fleur de Lys":  ("rare",        0.50),
-    "🔮 Orbe":          ("rare",        0.40),
-    "👁️ Œil du Démon":  ("epique",     0.20),
-    "🌑 Éclipse":       ("epique",     0.15),
-    "💀 Crâne Maudit":  ("epique",     0.10),
-    "🧿 Œil Bleu":      ("epique",     0.08),
-    "👑 Couronne":      ("legendaire",  0.05),
-    "🌟 Étoile d'Or":   ("legendaire",  0.03),
-    "⚫ Trou Noir":     ("legendaire",  0.02),
-    "🔱 Trident":       ("legendaire",  0.01),
+    "🌸 Sakura":            ("commun",      15.00),
+    "⭐ Étoile":            ("commun",      12.00),
+    "🌙 Lune":              ("commun",      10.00),
+    "🔥 Flamme":            ("commun",       8.00),
+    "💫 Étincelle":         ("commun",       8.00),
+    "🐉 Dragon":            ("peu_commun",   4.00),
+    "⚡ Foudre":            ("peu_commun",   3.00),
+    "🌊 Vague":             ("peu_commun",   3.00),
+    "🗡️ Katana":           ("peu_commun",   2.50),
+    "🦊 Renard":            ("peu_commun",   2.00),
+    "💎 Diamant":           ("rare",         1.00),
+    "🌺 Fleur de Cerisier": ("rare",         0.80),
+    "🦋 Papillon Noir":     ("rare",         0.60),
+    "⚜️ Fleur de Lys":      ("rare",         0.50),
+    "🔮 Orbe":              ("rare",         0.40),
+    "👁️ Œil du Démon":     ("epique",       0.20),
+    "🌑 Éclipse":           ("epique",       0.15),
+    "💀 Crâne Maudit":      ("epique",       0.10),
+    "🧿 Œil Bleu":          ("epique",       0.08),
+    "👑 Couronne":          ("legendaire",   0.05),
+    "🌟 Étoile d'Or":       ("legendaire",   0.03),
+    "⚫ Trou Noir":         ("legendaire",   0.02),
+    "🔱 Trident":           ("legendaire",   0.01),
 }
 
 RARETE_AFFICHAGE = {
@@ -78,17 +97,17 @@ RARETE_AFFICHAGE = {
 
 DB_FILE = "data.json"
 
-def load_db():
+def load_db() -> dict:
     if not os.path.exists(DB_FILE):
         return {}
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
-def save_db(data):
+def save_db(data: dict):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-def get_user(user_id: str):
+def get_user(user_id: str) -> dict:
     db = load_db()
     uid = str(user_id)
     if uid not in db:
@@ -130,17 +149,18 @@ def temps_restant_sabotage(user_data: dict) -> str:
 TIRAGES_TABLE = (
     [(nom, prob, "icone") for nom, (rarete, prob) in ICONES.items()]
     + [
-        ("Tokyo Coins",  20.00, "coins"),
-        ("Rien",         15.00, "rien"),
-        ("Pillage",       5.00, "pillage"),
-        ("Tirages x5",    4.00, "tirages"),
-        ("Sabotage",      2.00, "sabotage"),
+        ("Tokyo Coins", 20.00, "coins"),
+        ("Rien",        15.00, "rien"),
+        ("Pillage",      5.00, "pillage"),
+        ("Tirages x5",   4.00, "tirages"),
+        ("Sabotage",     2.00, "sabotage"),
     ]
 )
 
+TOTAL_PROB = sum(prob for _, prob, _ in TIRAGES_TABLE)
+
 def faire_tirage():
-    total = sum(prob for _, prob, _ in TIRAGES_TABLE)
-    r = random.uniform(0, total)
+    r = random.uniform(0, TOTAL_PROB)
     cumul = 0
     for nom, prob, categorie in TIRAGES_TABLE:
         cumul += prob
@@ -199,6 +219,44 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str):
 
     return user_data, msg, coins_gagnes
 
+def verifier_succes(user_data: dict, icones: list):
+    """Vérifie et attribue tous les succès en une seule passe."""
+    succes = user_data["succes"]
+    coins = user_data["coins"]
+
+    if "Premier Tirage" not in succes:
+        succes.append("Premier Tirage")
+    if coins >= 10000 and "Riche" not in succes:
+        succes.append("Riche")
+    if coins >= 100000 and "Légende" not in succes:
+        succes.append("Légende")
+    if len(icones) >= 10 and "Collectionneur" not in succes:
+        succes.append("Collectionneur")
+
+    communes = [n for n, (r, _) in ICONES.items() if r == "commun"]
+    if all(c in icones for c in communes) and "Grand Collectionneur" not in succes:
+        succes.append("Grand Collectionneur")
+
+    raretes_hautes = {"rare", "epique", "legendaire"}
+    if any(ICONES[i][0] in raretes_hautes for i in icones if i in ICONES) and "Chanceux" not in succes:
+        succes.append("Chanceux")
+    if any(ICONES[i][0] == "legendaire" for i in icones if i in ICONES) and "Béni des Dieux" not in succes:
+        succes.append("Béni des Dieux")
+
+# ==========================================
+#   RESET AUTOMATIQUE DES TIRAGES À MINUIT
+# ==========================================
+
+@tasks.loop(minutes=1)
+async def reset_tirages_minuit():
+    now = datetime.now()
+    if now.hour == 0 and now.minute == 0:
+        db = load_db()
+        for uid in db:
+            db[uid]["tirages"] = 3
+        save_db(db)
+        print("✅ Tirages remis à 3 pour tous les joueurs (minuit)")
+
 # ==========================================
 #   ÉVÉNEMENTS
 # ==========================================
@@ -206,6 +264,7 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
+    reset_tirages_minuit.start()
     print(f"✅ {bot.user} est en ligne ! Tokyo FR Casino prêt.")
     await bot.change_presence(activity=discord.Game(name="🎰 /tokyo — Tokyo FR Casino"))
 
@@ -513,23 +572,7 @@ class VueTirage(discord.ui.View):
             resultats.append(f"**Tirage {i+1}** — {msg}")
 
         icones = user_data.get("icones", [])
-        if "Premier Tirage" not in user_data["succes"]:
-            user_data["succes"].append("Premier Tirage")
-        if user_data["coins"] >= 10000 and "Riche" not in user_data["succes"]:
-            user_data["succes"].append("Riche")
-        if user_data["coins"] >= 100000 and "Légende" not in user_data["succes"]:
-            user_data["succes"].append("Légende")
-        if len(icones) >= 10 and "Collectionneur" not in user_data["succes"]:
-            user_data["succes"].append("Collectionneur")
-        communes = [n for n, (r, _) in ICONES.items() if r == "commun"]
-        if all(c in icones for c in communes) and "Grand Collectionneur" not in user_data["succes"]:
-            user_data["succes"].append("Grand Collectionneur")
-        raretes_hautes = {"rare", "epique", "legendaire"}
-        if any(ICONES[i][0] in raretes_hautes for i in icones if i in ICONES) and "Chanceux" not in user_data["succes"]:
-            user_data["succes"].append("Chanceux")
-        if any(ICONES[i][0] == "legendaire" for i in icones if i in ICONES) and "Béni des Dieux" not in user_data["succes"]:
-            user_data["succes"].append("Béni des Dieux")
-
+        verifier_succes(user_data, icones)
         save_user(str(interaction.user.id), user_data)
 
         tirages_restants = user_data.get("tirages", 0) + user_data.get("tirages_stock", 0)
@@ -665,4 +708,3 @@ async def classement(interaction: discord.Interaction):
 
 
 bot.run(TOKEN)
-
