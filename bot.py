@@ -5,22 +5,6 @@ import os
 import random
 import pytz
 from datetime import datetime, timedelta
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# ==========================================
-#   SERVEUR HTTP — nécessaire pour Render
-# ==========================================
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'OK')
-    def log_message(self, format, *args):
-        pass
-
-Thread(target=lambda: HTTPServer(('0.0.0.0', 8080), Handler).serve_forever(), daemon=True).start()
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
@@ -187,7 +171,6 @@ async def before_reset():
 #   PROBABILITÉS DE TIRAGE
 # ==========================================
 
-# Icônes + récompenses spéciales dans une table unifiée
 TIRAGES_TABLE: list[tuple[str, float, str]] = (
     [(nom, prob, "icone") for nom, (_, prob) in ICONES.items()]
     + [
@@ -200,7 +183,6 @@ TIRAGES_TABLE: list[tuple[str, float, str]] = (
 )
 
 TOTAL_PROB: float = sum(prob for _, prob, _ in TIRAGES_TABLE)
-# Cumulative weights précalculées pour performance
 _CUMUL: list[float] = []
 _acc = 0.0
 for _nom, _prob, _cat in TIRAGES_TABLE:
@@ -287,7 +269,6 @@ _ICONES_COMMUNES = {n for n, (r, _) in ICONES.items() if r == "commun"}
 _RARITES_HAUTES = {"rare", "epique", "legendaire"}
 
 def verifier_succes(user_data: dict) -> list[str]:
-    """Vérifie et ajoute les succès débloqués. Retourne la liste des nouveaux succès."""
     succes = set(user_data["succes"])
     icones = set(user_data.get("icones", []))
     coins = user_data["coins"]
@@ -593,7 +574,6 @@ class VueTirage(discord.ui.View):
             )
             return
 
-        # Décrémenter tirages (stock d'abord, puis daily)
         stock = user_data.get("tirages_stock", 0)
         daily = user_data.get("tirages", 3)
         used_stock = min(nb, stock)
@@ -737,7 +717,6 @@ async def classement(interaction: discord.Interaction):
     tri = sorted(db.items(), key=lambda x: x[1].get("coins", 0), reverse=True)[:10]
     embed = discord.Embed(title="🏆 Classement — Tokyo Coins", color=0xF1C40F)
 
-    # Résoudre tous les users en une passe pour éviter les requêtes en série
     for idx, (uid, data) in enumerate(tri):
         user = bot.get_user(int(uid))
         if user is None:
