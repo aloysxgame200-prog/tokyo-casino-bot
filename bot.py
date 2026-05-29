@@ -3,10 +3,11 @@ from discord.ext import commands, tasks
 import json
 import os
 import random
+import asyncio
 import pytz
 from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer  # ← AJOUTE
-import threading                                             # ← AJOUTE
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
@@ -36,44 +37,6 @@ async def check_salon(interaction: discord.Interaction) -> bool:
         )
         return False
     return True
-
-# ==========================================
-#   ICÔNES À COLLECTIONNER
-# ==========================================
-
-ICONES = {
-    "🌸 Sakura":            ("commun",      15.00),
-    "⭐ Étoile":            ("commun",      12.00),
-    "🌙 Lune":              ("commun",      10.00),
-    "🔥 Flamme":            ("commun",       8.00),
-    "💫 Étincelle":         ("commun",       8.00),
-    "🐉 Dragon":            ("peu_commun",   4.00),
-    "⚡ Foudre":            ("peu_commun",   3.00),
-    "🌊 Vague":             ("peu_commun",   3.00),
-    "🗡️ Katana":           ("peu_commun",   2.50),
-    "🦊 Renard":            ("peu_commun",   2.00),
-    "💎 Diamant":           ("rare",         1.00),
-    "🌺 Fleur de Cerisier": ("rare",         0.80),
-    "🦋 Papillon Noir":     ("rare",         0.60),
-    "⚜️ Fleur de Lys":      ("rare",         0.50),
-    "🔮 Orbe":              ("rare",         0.40),
-    "👁️ Œil du Démon":     ("epique",       0.20),
-    "🌑 Éclipse":           ("epique",       0.15),
-    "💀 Crâne Maudit":      ("epique",       0.10),
-    "🧿 Œil Bleu":          ("epique",       0.08),
-    "👑 Couronne":          ("legendaire",   0.05),
-    "🌟 Étoile d'Or":       ("legendaire",   0.03),
-    "⚫ Trou Noir":         ("legendaire",   0.02),
-    "🔱 Trident":           ("legendaire",   0.01),
-}
-
-RARETE_AFFICHAGE = {
-    "commun":     "⬜ Commun",
-    "peu_commun": "🟦 Peu commun",
-    "rare":       "🟣 Rare",
-    "epique":     "🟡 Épique",
-    "legendaire": "🔴 Légendaire",
-}
 
 # ==========================================
 #   BASE DE DONNÉES (cache en mémoire)
@@ -106,14 +69,15 @@ def _default_user() -> dict:
         "coins": 500,
         "tirages": 3,
         "tirages_stock": 0,
-        "icones": [],
-        "succes": ["Bienvenue"],
         "pillages": 0,
         "sabotages": 0,
+        "contre_sabotages": 0,
         "pillages_total": 0,
         "sabotages_total": 0,
         "sabote_jusqu": None,
         "dernier_reset": None,
+        "duels_gagnes": 0,
+        "duels_perdus": 0,
     }
 
 def get_user(user_id: str) -> dict:
@@ -122,7 +86,17 @@ def get_user(user_id: str) -> dict:
     if uid not in db:
         db[uid] = _default_user()
         save_db(db)
-    return db[uid]
+    u = db[uid]
+    # migration : champs manquants pour anciens comptes
+    changed = False
+    for k, v in _default_user().items():
+        if k not in u:
+            u[k] = v
+            changed = True
+    if changed:
+        db[uid] = u
+        save_db(db)
+    return u
 
 def save_user(user_id: str, data: dict):
     db = load_db()
@@ -171,18 +145,26 @@ async def before_reset():
 
 # ==========================================
 #   PROBABILITÉS DE TIRAGE
+#   Paliers coins : 0-500 / 501-1000 / 1001-2000 / 2001-2500
 # ==========================================
 
-TIRAGES_TABLE: list[tuple[str, float, str]] = (
-    [(nom, prob, "icone") for nom, (_, prob) in ICONES.items()]
-    + [
-        ("Tokyo Coins", 20.00, "coins"),
-        ("Rien",        15.00, "rien"),
-        ("Pillage",      5.00, "pillage"),
-        ("Tirages x5",   4.00, "tirages"),
-        ("Sabotage",     2.00, "sabotage"),
-    ]
-)
+TIRAGES_TABLE: list[tuple[str, float, str]] = [
+    ("coins_tier1",  20.00, "coins"),   # 0–500
+    ("coins_tier2",  15.00, "coins"),   # 501–1 000
+    ("coins_tier3",  10.00, "coins"),   # 1 001–2 000
+    ("coins_tier4",   5.00, "coins"),   # 2 001–2 500
+    ("Rien",         18.00, "rien"),
+    ("Pillage",       7.00, "pillage"),
+    ("Tirages x5",    5.00, "tirages"),
+    ("Sabotage",      3.00, "sabotage"),
+]
+
+COINS_PALIERS = {
+    "coins_tier1": (0,    500),
+    "coins_tier2": (501,  1000),
+    "coins_tier3": (1001, 2000),
+    "coins_tier4": (2001, 2500),
+}
 
 TOTAL_PROB: float = sum(prob for _, prob, _ in TIRAGES_TABLE)
 _CUMUL: list[float] = []
@@ -199,100 +181,57 @@ def faire_tirage() -> tuple[str, str]:
             return cat, nom
     return "rien", "Rien"
 
-def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str, int]:
-    coins_gagnes = random.randint(100, 940)
+def faire_tirage_duel() -> tuple[str, int]:
+    """Tirage spécial pour le duel — retourne (label, coins) uniquement coins/rien."""
+    cat, nom = faire_tirage()
+    if cat == "coins":
+        lo, hi = COINS_PALIERS[nom]
+        montant = random.randint(lo, hi)
+        return f"💰 {montant:,} coins", montant
+    elif cat == "rien":
+        return "😔 Rien", 0
+    elif cat == "pillage":
+        return "🗡️ Pillage (→ 0 coins)", 0
+    elif cat == "tirages":
+        return "🎲 Tirages bonus (→ 0 coins)", 0
+    elif cat == "sabotage":
+        return "🔥 Sabotage (→ 0 coins)", 0
+    return "😔 Rien", 0
 
-    if categorie == "icone":
-        rarete, _ = ICONES[nom]
-        rarete_texte = RARETE_AFFICHAGE[rarete]
-        if nom not in user_data["icones"]:
-            user_data["icones"].append(nom)
-            msg = (
-                f"{nom} obtenu ! ✨\n"
-                f"└ Rareté : **{rarete_texte}**\n"
-                f"└ Nouvelle icône ajoutée à ta collection !"
-            )
-        else:
-            msg = (
-                f"{nom} — déjà dans ta collection !\n"
-                f"└ Rareté : **{rarete_texte}**\n"
-                f"└ Bonus consolation : **+{coins_gagnes:,} coins** 💰"
-            )
-    elif categorie == "coins":
-        montant = random.randint(300, 1200)
-        user_data["coins"] += montant
-        coins_gagnes = 0
+def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str, int]:
+    if categorie == "coins":
+        lo, hi = COINS_PALIERS.get(nom, (100, 500))
+        montant = random.randint(lo, hi)
+        user_data["coins"] = user_data.get("coins", 0) + montant
         msg = f"💰 **{montant:,} Tokyo Coins** tombent dans ta poche !"
+        return user_data, msg, montant
+
     elif categorie == "rien":
-        coins_gagnes = 0
         msg = "😔 **Rien** cette fois... La chance te sourira au prochain tirage !"
+        return user_data, msg, 0
+
     elif categorie == "pillage":
         user_data["pillages"] = user_data.get("pillages", 0) + 1
-        coins_gagnes = 0
         msg = (
             "🗡️ **Pillage** obtenu !\n"
-            "└ Utilise `/tokyo_piller @quelquun` pour lui voler des Tokyo Coins.\n"
-            "└ Tu voles entre 10% et 30% de ses coins."
+            "└ Utilise `/tokyo_piller @quelquun` pour lui voler **tous ses tirages**."
         )
+        return user_data, msg, 0
+
     elif categorie == "tirages":
         user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + 5
-        coins_gagnes = 0
         msg = "🎲 **5 tirages bonus** ajoutés à ton compteur !"
+        return user_data, msg, 0
+
     elif categorie == "sabotage":
         user_data["sabotages"] = user_data.get("sabotages", 0) + 1
-        coins_gagnes = 0
         msg = (
             "🔥 **Sabotage** obtenu !\n"
             "└ Utilise `/tokyo_saboter @quelquun` pour bloquer tous ses tirages pendant **24 heures**."
         )
-    else:
-        coins_gagnes = 0
-        msg = "❓ Résultat inconnu."
+        return user_data, msg, 0
 
-    if coins_gagnes > 0:
-        user_data["coins"] = user_data.get("coins", 0) + coins_gagnes
-
-    return user_data, msg, coins_gagnes
-
-SUCCES_LISTE = {
-    "Bienvenue":            "Rejoindre le Tokyo FR Casino",
-    "Premier Tirage":       "Faire ton premier tirage",
-    "Riche":                "Accumuler 10 000 Tokyo Coins",
-    "Collectionneur":       "Obtenir 10 icônes différentes",
-    "Grand Collectionneur": "Obtenir toutes les icônes communes",
-    "Chanceux":             "Obtenir une icône Rare ou mieux",
-    "Béni des Dieux":       "Obtenir une icône Légendaire",
-    "Pillard":              "Piller 3 membres",
-    "Saboteur":             "Saboter 3 membres",
-    "Légende":              "Atteindre 100 000 Tokyo Coins",
-}
-
-_ICONES_COMMUNES = {n for n, (r, _) in ICONES.items() if r == "commun"}
-_RARITES_HAUTES = {"rare", "epique", "legendaire"}
-
-def verifier_succes(user_data: dict) -> list[str]:
-    succes = set(user_data["succes"])
-    icones = set(user_data.get("icones", []))
-    coins = user_data["coins"]
-    nouveaux = []
-
-    def _check(nom: str, condition: bool):
-        if condition and nom not in succes:
-            succes.add(nom)
-            nouveaux.append(nom)
-
-    _check("Premier Tirage", True)
-    _check("Riche", coins >= 10_000)
-    _check("Légende", coins >= 100_000)
-    _check("Collectionneur", len(icones) >= 10)
-    _check("Grand Collectionneur", _ICONES_COMMUNES.issubset(icones))
-    _check("Chanceux", any(ICONES[i][0] in _RARITES_HAUTES for i in icones if i in ICONES))
-    _check("Béni des Dieux", any(ICONES[i][0] == "legendaire" for i in icones if i in ICONES))
-    _check("Pillard", user_data.get("pillages_total", 0) >= 3)
-    _check("Saboteur", user_data.get("sabotages_total", 0) >= 3)
-
-    user_data["succes"] = list(succes)
-    return nouveaux
+    return user_data, "❓ Résultat inconnu.", 0
 
 # ==========================================
 #   ÉVÉNEMENTS
@@ -317,26 +256,25 @@ async def tokyo(interaction: discord.Interaction):
 
     user = get_user(str(interaction.user.id))
     tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
-    nb_icones = len(user.get("icones", []))
 
     embed = discord.Embed(title="🎰 Tokyo FR Casino", color=0xFF4444)
     embed.description = (
         f"Bienvenue au **Tokyo FR Casino** !\n"
-        f"💰 **{user['coins']:,} coins**  •  🎲 **{tirages_dispo} tirages**  •  🖼️ **{nb_icones} icônes**\n\n"
-        "**💰 Profil** — Tes stats et icônes\n"
+        f"💰 **{user['coins']:,} coins**  •  🎲 **{tirages_dispo} tirages**\n\n"
+        "**💰 Profil** — Tes stats\n"
         "**🎲 Tirage** — Tente ta chance !\n"
         "**🏪 Shop** — Dépense tes coins\n"
-        "**🖼️ Collection** — Toutes tes icônes\n"
-        "**🏆 Succès** — Tes objectifs"
+        "**⚔️ Duel** — Défie un membre\n"
+        "**🏆 Classement** — Top 10 coins"
     )
     embed.set_footer(text="3 tirages gratuits par jour • Remis à zéro à minuit (heure de Paris)")
     await interaction.response.send_message(embed=embed, view=MenuPrincipal(), ephemeral=True)
 
 # ==========================================
-#   /tokyo_piller
+#   /tokyo_piller — vole TOUS les tirages
 # ==========================================
 
-@bot.tree.command(name="tokyo_piller", description="🗡️ Vole des coins à un membre (nécessite un Pillage)")
+@bot.tree.command(name="tokyo_piller", description="🗡️ Vole tous les tirages d'un membre (nécessite un Pillage)")
 async def piller(interaction: discord.Interaction, cible: discord.Member):
     if not await check_salon(interaction):
         return
@@ -353,34 +291,34 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
     if voleur.get("pillages", 0) <= 0:
         await interaction.response.send_message(
             "❌ Tu n'as pas de **Pillage** disponible !\n"
-            "└ Gagne-en au tirage ou achète-en dans le /tokyo Shop.",
+            "└ Gagne-en au tirage ou achète-en dans le Shop.",
             ephemeral=True
         )
         return
 
-    if victime["coins"] < 50:
+    tirages_voles = victime.get("tirages", 0) + victime.get("tirages_stock", 0)
+
+    if tirages_voles <= 0:
         await interaction.response.send_message(
-            f"❌ **{cible.display_name}** est trop pauvre, il n'y a rien à voler !",
+            f"❌ **{cible.display_name}** n'a aucun tirage à voler !",
             ephemeral=True
         )
         return
 
-    pourcentage = random.uniform(0.10, 0.30)
-    montant_vole = max(50, min(int(victime["coins"] * pourcentage), victime["coins"]))
-
-    voleur["coins"] += montant_vole
+    # On vole tous les tirages (daily + stock)
+    victime["tirages"] = 0
+    victime["tirages_stock"] = 0
+    voleur["tirages_stock"] = voleur.get("tirages_stock", 0) + tirages_voles
     voleur["pillages"] -= 1
     voleur["pillages_total"] = voleur.get("pillages_total", 0) + 1
-    victime["coins"] -= montant_vole
 
-    verifier_succes(voleur)
     save_user(str(interaction.user.id), voleur)
     save_user(str(cible.id), victime)
 
     embed = discord.Embed(title="🗡️ Pillage réussi !", color=0xE74C3C)
     embed.description = (
-        f"Tu as volé **{montant_vole:,} coins** à **{cible.display_name}** !\n\n"
-        f"💰 Ton solde : **{voleur['coins']:,}**\n"
+        f"Tu as volé **{tirages_voles} tirage(s)** à **{cible.display_name}** !\n\n"
+        f"🎲 Tes tirages : **{voleur.get('tirages', 0) + voleur.get('tirages_stock', 0)}**\n"
         f"🗡️ Pillages restants : **{voleur['pillages']}**"
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -388,7 +326,7 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
     try:
         await cible.send(
             f"🗡️ **{interaction.user.display_name}** t'a pillé sur **Tokyo FR** !\n"
-            f"Il t'a volé **{montant_vole:,} Tokyo Coins**. Prépare ta revanche avec un Pillage..."
+            f"Il t'a volé **{tirages_voles} tirage(s)**. Prépare ta revanche..."
         )
     except Exception:
         pass
@@ -414,7 +352,7 @@ async def saboter(interaction: discord.Interaction, cible: discord.Member):
     if saboteur.get("sabotages", 0) <= 0:
         await interaction.response.send_message(
             "❌ Tu n'as pas de **Sabotage** disponible !\n"
-            "└ Gagne-en au tirage ou achète-en dans le /tokyo Shop.",
+            "└ Gagne-en au tirage ou achète-en dans le Shop.",
             ephemeral=True
         )
         return
@@ -430,7 +368,6 @@ async def saboter(interaction: discord.Interaction, cible: discord.Member):
     saboteur["sabotages"] -= 1
     saboteur["sabotages_total"] = saboteur.get("sabotages_total", 0) + 1
 
-    verifier_succes(saboteur)
     save_user(str(interaction.user.id), saboteur)
     save_user(str(cible.id), victime)
 
@@ -450,6 +387,270 @@ async def saboter(interaction: discord.Interaction, cible: discord.Member):
         pass
 
 # ==========================================
+#   /tokyo_contresaboter
+# ==========================================
+
+@bot.tree.command(name="tokyo_contresaboter", description="🛡️ Annule ton sabotage actif (nécessite un Contre-Sabotage)")
+async def contresaboter(interaction: discord.Interaction):
+    if not await check_salon(interaction):
+        return
+
+    user_data = get_user(str(interaction.user.id))
+
+    if user_data.get("contre_sabotages", 0) <= 0:
+        await interaction.response.send_message(
+            "❌ Tu n'as pas de **Contre-Sabotage** disponible !\n"
+            "└ Achète-en dans le Shop.",
+            ephemeral=True
+        )
+        return
+
+    if not est_sabote(user_data):
+        await interaction.response.send_message(
+            "✅ Tu n'es pas saboté en ce moment, rien à annuler !",
+            ephemeral=True
+        )
+        return
+
+    user_data["sabote_jusqu"] = None
+    user_data["contre_sabotages"] -= 1
+    save_user(str(interaction.user.id), user_data)
+
+    embed = discord.Embed(title="🛡️ Sabotage annulé !", color=0x2ECC71)
+    embed.description = (
+        "Ton sabotage a été **annulé** ! Tu peux à nouveau faire des tirages.\n\n"
+        f"🛡️ Contre-Sabotages restants : **{user_data['contre_sabotages']}**"
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ==========================================
+#   DUELS EN ATTENTE (mémoire globale)
+# ==========================================
+
+# duel_en_attente[challenger_id] = {"cible_id": int, "message_id": int, "channel_id": int}
+duel_en_attente: dict[int, dict] = {}
+
+# ==========================================
+#   /tokyo_duel
+# ==========================================
+
+@bot.tree.command(name="tokyo_duel", description="⚔️ Défie un membre — mise 3 tirages chacun, le gagnant prend tout")
+async def duel_cmd(interaction: discord.Interaction, cible: discord.Member):
+    if not await check_salon(interaction):
+        return
+    if cible.id == interaction.user.id:
+        await interaction.response.send_message("❌ Tu ne peux pas te défier toi-même !", ephemeral=True)
+        return
+    if cible.bot:
+        await interaction.response.send_message("❌ Tu ne peux pas défier un bot !", ephemeral=True)
+        return
+
+    challenger = get_user(str(interaction.user.id))
+    tirages_c = challenger.get("tirages", 0) + challenger.get("tirages_stock", 0)
+    if tirages_c < 3:
+        await interaction.response.send_message(
+            f"❌ Tu n'as que **{tirages_c}** tirage(s), il t'en faut **3** pour un duel !",
+            ephemeral=True
+        )
+        return
+
+    # Envoi de la demande en DM à la cible
+    try:
+        dm_embed = discord.Embed(title="⚔️ Défi de Duel !", color=0xFF4444)
+        dm_embed.description = (
+            f"**{interaction.user.display_name}** te défie en duel sur **Tokyo FR Casino** !\n\n"
+            f"🎲 Mise : **3 tirages** chacun\n"
+            f"🏆 Le gagnant remporte les **6 tirages** au total\n\n"
+            f"Va dans <#{SALON_AUTORISE}> et utilise `/tokyo_accepter_duel` pour accepter !"
+        )
+        await cible.send(embed=dm_embed)
+    except Exception:
+        pass  # DM désactivé, tant pis
+
+    # On enregistre le duel en attente
+    duel_en_attente[interaction.user.id] = {
+        "cible_id": cible.id,
+        "expire": (now_local() + timedelta(minutes=5)).isoformat(),
+    }
+
+    embed = discord.Embed(title="⚔️ Défi envoyé !", color=0xFF8C00)
+    embed.description = (
+        f"Tu as défié **{cible.display_name}** !\n\n"
+        f"🎲 Mise : **3 tirages** chacun\n"
+        f"Il a **5 minutes** pour accepter avec `/tokyo_accepter_duel`."
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ==========================================
+#   /tokyo_accepter_duel
+# ==========================================
+
+@bot.tree.command(name="tokyo_accepter_duel", description="⚔️ Accepte le duel en attente contre toi")
+async def accepter_duel(interaction: discord.Interaction):
+    if not await check_salon(interaction):
+        return
+
+    # Chercher un duel où la cible = interaction.user.id
+    challenger_id = None
+    for cid, info in list(duel_en_attente.items()):
+        if info["cible_id"] == interaction.user.id:
+            # Vérifier expiration
+            if now_local() > datetime.fromisoformat(info["expire"]):
+                del duel_en_attente[cid]
+                await interaction.response.send_message(
+                    "❌ Le défi a expiré (5 minutes dépassées).", ephemeral=True
+                )
+                return
+            challenger_id = cid
+            break
+
+    if challenger_id is None:
+        await interaction.response.send_message(
+            "❌ Aucun défi en attente pour toi en ce moment.", ephemeral=True
+        )
+        return
+
+    del duel_en_attente[challenger_id]
+
+    cible_id = interaction.user.id
+    challenger_data = get_user(str(challenger_id))
+    cible_data = get_user(str(cible_id))
+
+    # Vérifier tirages des deux
+    tirages_c = challenger_data.get("tirages", 0) + challenger_data.get("tirages_stock", 0)
+    tirages_ci = cible_data.get("tirages", 0) + cible_data.get("tirages_stock", 0)
+
+    if tirages_c < 3:
+        await interaction.response.send_message(
+            "❌ Le challenger n'a plus assez de tirages pour le duel (il lui faut 3).", ephemeral=True
+        )
+        return
+    if tirages_ci < 3:
+        await interaction.response.send_message(
+            f"❌ Tu n'as que **{tirages_ci}** tirage(s), il t'en faut **3** pour accepter !", ephemeral=True
+        )
+        return
+
+    # Déduire la mise des deux joueurs
+    def deduire_tirages(data: dict, nb: int):
+        stock = data.get("tirages_stock", 0)
+        daily = data.get("tirages", 0)
+        used_stock = min(nb, stock)
+        used_daily = nb - used_stock
+        data["tirages_stock"] = stock - used_stock
+        data["tirages"] = max(0, daily - used_daily)
+        return data
+
+    challenger_data = deduire_tirages(challenger_data, 3)
+    cible_data = deduire_tirages(cible_data, 3)
+    save_user(str(challenger_id), challenger_data)
+    save_user(str(cible_id), cible_data)
+
+    await interaction.response.send_message(
+        "⚔️ **Duel en cours...** Les tirages se déroulent, résultats dans quelques secondes !",
+        ephemeral=True
+    )
+
+    # Effectuer les 3 tirages pour chacun
+    async def effectuer_3_tirages():
+        resultats_c = []
+        resultats_ci = []
+        score_c = 0
+        score_ci = 0
+
+        for _ in range(3):
+            label_c, val_c = faire_tirage_duel()
+            label_ci, val_ci = faire_tirage_duel()
+            resultats_c.append((label_c, val_c))
+            resultats_ci.append((label_ci, val_ci))
+            score_c += val_c
+            score_ci += val_ci
+            await asyncio.sleep(1.2)
+
+        return resultats_c, resultats_ci, score_c, score_ci
+
+    resultats_c, resultats_ci, score_c, score_ci = await effectuer_3_tirages()
+
+    # Déterminer le gagnant
+    if score_c > score_ci:
+        gagnant_id = challenger_id
+        perdant_id = cible_id
+    elif score_ci > score_c:
+        gagnant_id = cible_id
+        perdant_id = challenger_id
+    else:
+        gagnant_id = None  # Égalité
+
+    gagnant_data = get_user(str(gagnant_id)) if gagnant_id else None
+    perdant_data = get_user(str(perdant_id)) if gagnant_id else None
+
+    if gagnant_id:
+        # Le gagnant récupère 6 tirages
+        gagnant_data["tirages_stock"] = gagnant_data.get("tirages_stock", 0) + 6
+        gagnant_data["duels_gagnes"] = gagnant_data.get("duels_gagnes", 0) + 1
+        perdant_data["duels_perdus"] = perdant_data.get("duels_perdus", 0) + 1
+        save_user(str(gagnant_id), gagnant_data)
+        save_user(str(perdant_id), perdant_data)
+    else:
+        # Égalité : on rembourse les 3 tirages à chacun
+        challenger_data = get_user(str(challenger_id))
+        cible_data = get_user(str(cible_id))
+        challenger_data["tirages_stock"] = challenger_data.get("tirages_stock", 0) + 3
+        cible_data["tirages_stock"] = cible_data.get("tirages_stock", 0) + 3
+        save_user(str(challenger_id), challenger_data)
+        save_user(str(cible_id), cible_data)
+
+    # Récupérer les noms
+    try:
+        challenger_user = await bot.fetch_user(challenger_id)
+        nom_c = challenger_user.display_name
+    except Exception:
+        nom_c = "Challenger"
+
+    nom_ci = interaction.user.display_name
+
+    # Construction du résultat côte à côte
+    def ligne_tirage(label: str, val: int) -> str:
+        return f"`{label}`"
+
+    lignes_c = "\n".join(
+        f"Tirage {i+1} — {ligne_tirage(l, v)}" for i, (l, v) in enumerate(resultats_c)
+    )
+    lignes_ci = "\n".join(
+        f"Tirage {i+1} — {ligne_tirage(l, v)}" for i, (l, v) in enumerate(resultats_ci)
+    )
+
+    if gagnant_id == challenger_id:
+        conclusion = f"🏆 **{nom_c}** remporte le duel et gagne **6 tirages** !"
+    elif gagnant_id == cible_id:
+        conclusion = f"🏆 **{nom_ci}** remporte le duel et gagne **6 tirages** !"
+    else:
+        conclusion = "🤝 **Égalité !** Les mises sont remboursées (3 tirages chacun)."
+
+    embed = discord.Embed(title="⚔️ Résultats du Duel", color=0xF1C40F)
+    embed.add_field(
+        name=f"🗡️ {nom_c}",
+        value=f"{lignes_c}\n\n💰 **Total : {score_c:,} coins**",
+        inline=True
+    )
+    embed.add_field(
+        name=f"🛡️ {nom_ci}",
+        value=f"{lignes_ci}\n\n💰 **Total : {score_ci:,} coins**",
+        inline=True
+    )
+    embed.add_field(name="─" * 30, value=conclusion, inline=False)
+
+    # Envoyer les résultats aux deux joueurs en ephemeral
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # Envoyer aussi au challenger par DM (pas d'autre moyen en full ephemeral)
+    try:
+        challenger_user = await bot.fetch_user(challenger_id)
+        await challenger_user.send(embed=embed)
+    except Exception:
+        pass
+
+# ==========================================
 #   VUES
 # ==========================================
 
@@ -461,23 +662,20 @@ class MenuPrincipal(discord.ui.View):
     async def profil(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = get_user(str(interaction.user.id))
         tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
-        icones = user.get("icones", [])
 
         embed = discord.Embed(title=f"💰 Profil de {interaction.user.display_name}", color=0x5865F2)
         embed.add_field(name="Tokyo Coins", value=f"**{user['coins']:,}** 💰", inline=True)
         embed.add_field(name="Tirages dispo", value=f"**{tirages_dispo}** 🎲", inline=True)
-        embed.add_field(name="Icônes", value=f"**{len(icones)}** collectionnées 🖼️", inline=True)
         embed.add_field(name="Pillages", value=f"**{user.get('pillages', 0)}** 🗡️", inline=True)
         embed.add_field(name="Sabotages", value=f"**{user.get('sabotages', 0)}** 🔥", inline=True)
-
-        if icones:
-            apercu = "  ".join(icones[-10:])
-            embed.add_field(name="🖼️ Dernières icônes", value=apercu, inline=False)
+        embed.add_field(name="Contre-Sabotages", value=f"**{user.get('contre_sabotages', 0)}** 🛡️", inline=True)
+        embed.add_field(name="Duels", value=f"**{user.get('duels_gagnes', 0)}W / {user.get('duels_perdus', 0)}L** ⚔️", inline=True)
 
         if est_sabote(user):
             embed.add_field(
                 name="⚠️ TU ES SABOTÉ",
-                value=f"Tirages bloqués encore **{temps_restant_sabotage(user)}**.",
+                value=f"Tirages bloqués encore **{temps_restant_sabotage(user)}**.\n"
+                      f"Utilise `/tokyo_contresaboter` si tu as un Contre-Sabotage !",
                 inline=False
             )
 
@@ -490,11 +688,16 @@ class MenuPrincipal(discord.ui.View):
         embed = discord.Embed(title="🎲 Tirages", color=0xFF8C00)
         embed.description = (
             "**Comment ça marche ?**\n"
-            "Chaque tirage te donne un résultat aléatoire :\n"
-            "🖼️ Icônes à collectionner • 💰 Coins\n"
-            "🗡️ Pillage • 🔥 Sabotage • 🎲 Tirages bonus\n\n"
-            "**Les icônes ont 5 niveaux de rareté :**\n"
-            "⬜ Commun • 🟦 Peu commun • 🟣 Rare • 🟡 Épique • 🔴 Légendaire\n\n"
+            "Chaque tirage donne un résultat aléatoire :\n\n"
+            "💰 **Coins** — 4 paliers possibles :\n"
+            "└ Tier 1 : 0 – 500 coins\n"
+            "└ Tier 2 : 501 – 1 000 coins\n"
+            "└ Tier 3 : 1 001 – 2 000 coins\n"
+            "└ Tier 4 : 2 001 – 2 500 coins\n\n"
+            "😔 **Rien** — Pas de chance cette fois\n"
+            "🗡️ **Pillage** — Vole tous les tirages d'un membre\n"
+            "🎲 **Tirages x5** — Bonus de tirages\n"
+            "🔥 **Sabotage** — Bloque quelqu'un 24h\n\n"
             f"Tu as **{tirages_dispo} tirage(s)** disponible(s).\n"
             "_(3 tirages gratuits par jour, remis à zéro à minuit)_"
         )
@@ -507,48 +710,63 @@ class MenuPrincipal(discord.ui.View):
         embed.description = (
             f"Tu as **{user['coins']:,} Tokyo Coins** 💰\n\n"
             "🎲 **Tirages x10** — 30 000 coins\n"
-            "└ Ajoute 10 tirages à ton compteur\n\n"
+            "└ Ajoute 10 tirages à ton stock\n\n"
             "🗡️ **Pillage x3** — 30 000 coins\n"
-            "└ Pour voler des coins à d'autres membres avec `/tokyo_piller`\n\n"
+            "└ Vole **tous les tirages** d'un membre avec `/tokyo_piller`\n\n"
             "🔥 **Sabotage x1** — 15 000 coins\n"
             "└ Bloque les tirages de quelqu'un 24h avec `/tokyo_saboter`\n\n"
+            "🛡️ **Contre-Sabotage x1** — 15 000 coins\n"
+            "└ Annule immédiatement ton sabotage actif avec `/tokyo_contresaboter`\n\n"
             "💎 **Discord Nitro** — 2 000 000 coins\n"
             "└ Un vrai Discord Nitro offert par l'admin ! 🎉"
         )
         await interaction.response.send_message(embed=embed, view=VueShop(), ephemeral=True)
 
-    @discord.ui.button(label="Collection", style=discord.ButtonStyle.secondary, emoji="🖼️")
-    async def collection(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = get_user(str(interaction.user.id))
-        icones = user.get("icones", [])
-        embed = discord.Embed(title="🖼️ Ta Collection d'Icônes", color=0x9B59B6)
-
-        if not icones:
-            embed.description = "Tu n'as encore aucune icône !\nFais des tirages pour en collecter."
-        else:
-            par_rarete: dict[str, list] = {k: [] for k in ["legendaire", "epique", "rare", "peu_commun", "commun"]}
-            for icone in icones:
-                if icone in ICONES:
-                    par_rarete[ICONES[icone][0]].append(icone)
-            for rarete, liste in par_rarete.items():
-                if liste:
-                    embed.add_field(
-                        name=f"{RARETE_AFFICHAGE[rarete]} ({len(liste)})",
-                        value="  ".join(liste),
-                        inline=False
-                    )
-            embed.set_footer(text=f"Total : {len(icones)} icône(s) collectionnée(s)")
-
+    @discord.ui.button(label="Duel", style=discord.ButtonStyle.danger, emoji="⚔️")
+    async def duel_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(title="⚔️ Duel", color=0xFF4444)
+        embed.description = (
+            "**Comment ça marche ?**\n\n"
+            "1️⃣ Utilise `/tokyo_duel @membre` pour défier quelqu'un\n"
+            "2️⃣ Il reçoit un DM et a **5 minutes** pour accepter avec `/tokyo_accepter_duel`\n"
+            "3️⃣ Chacun fait **3 tirages** (coins uniquement comptabilisés)\n"
+            "4️⃣ Celui avec le **plus de coins** gagne les **6 tirages** misés\n\n"
+            "🎲 Mise : **3 tirages** par joueur\n"
+            "🏆 Gain : **6 tirages** pour le vainqueur\n"
+            "🤝 Égalité : remboursement des mises\n\n"
+            "_Tu as besoin d'au moins 3 tirages pour défier !_"
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Succès", style=discord.ButtonStyle.secondary, emoji="🏆")
-    async def succes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = get_user(str(interaction.user.id))
-        embed = discord.Embed(title="🏆 Succès", color=0xF1C40F)
-        embed.description = "✅ = débloqué  •  🔒 = pas encore obtenu"
-        for nom, desc in SUCCES_LISTE.items():
-            etat = "✅" if nom in user["succes"] else "🔒"
-            embed.add_field(name=f"{etat} {nom}", value=desc, inline=True)
+    @discord.ui.button(label="Classement", style=discord.ButtonStyle.secondary, emoji="🏆")
+    async def classement_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = load_db()
+        if not db:
+            await interaction.response.send_message("Aucun joueur enregistré.", ephemeral=True)
+            return
+
+        tri = sorted(db.items(), key=lambda x: x[1].get("coins", 0), reverse=True)[:10]
+        embed = discord.Embed(title="🏆 Classement — Tokyo Coins", color=0xF1C40F)
+
+        for idx, (uid, data) in enumerate(tri):
+            user_obj = bot.get_user(int(uid))
+            if user_obj is None:
+                try:
+                    user_obj = await bot.fetch_user(int(uid))
+                    nom = user_obj.display_name
+                except Exception:
+                    nom = "Joueur inconnu"
+            else:
+                nom = user_obj.display_name
+
+            medaille = ["🥇", "🥈", "🥉"][idx] if idx < 3 else f"**#{idx+1}**"
+            tirages = data.get("tirages", 0) + data.get("tirages_stock", 0)
+            embed.add_field(
+                name=f"{medaille} {nom}",
+                value=f"{data.get('coins', 0):,} coins • {tirages} tirages",
+                inline=False
+            )
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -562,7 +780,7 @@ class VueTirage(discord.ui.View):
         if est_sabote(user_data):
             await interaction.response.send_message(
                 f"🔥 **Tu es saboté !** Tes tirages sont bloqués encore **{temps_restant_sabotage(user_data)}**.\n"
-                "Quelqu'un t'a mis un Sabotage... Prépare ta revanche !",
+                "Utilise `/tokyo_contresaboter` si tu as un Contre-Sabotage !",
                 ephemeral=True
             )
             return
@@ -589,7 +807,6 @@ class VueTirage(discord.ui.View):
             user_data, msg, _ = appliquer_gain(user_data, categorie, nom)
             resultats.append(f"**Tirage {i+1}** — {msg}")
 
-        verifier_succes(user_data)
         save_user(str(interaction.user.id), user_data)
 
         tirages_restants = user_data.get("tirages", 0) + user_data.get("tirages_stock", 0)
@@ -635,6 +852,8 @@ class VueShop(discord.ui.View):
             user_data["pillages"] = user_data.get("pillages", 0) + 3
         elif item == "sabotage_x1":
             user_data["sabotages"] = user_data.get("sabotages", 0) + 1
+        elif item == "contresabotage_x1":
+            user_data["contre_sabotages"] = user_data.get("contre_sabotages", 0) + 1
         elif item == "nitro":
             try:
                 owner = await bot.fetch_user(OWNER_ID)
@@ -653,7 +872,7 @@ class VueShop(discord.ui.View):
 
     @discord.ui.button(label="Tirages x10 — 30 000", style=discord.ButtonStyle.primary, emoji="🎲")
     async def buy_tirages(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.acheter(interaction, 30000, "tirages_x10", "🎲 **10 tirages** ajoutés à ton compteur !")
+        await self.acheter(interaction, 30000, "tirages_x10", "🎲 **10 tirages** ajoutés à ton stock !")
 
     @discord.ui.button(label="Pillage x3 — 30 000", style=discord.ButtonStyle.danger, emoji="🗡️")
     async def buy_pillage(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -662,6 +881,10 @@ class VueShop(discord.ui.View):
     @discord.ui.button(label="Sabotage x1 — 15 000", style=discord.ButtonStyle.secondary, emoji="🔥")
     async def buy_sabo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.acheter(interaction, 15000, "sabotage_x1", "🔥 **Sabotage** obtenu ! Utilise `/tokyo_saboter @quelquun`.")
+
+    @discord.ui.button(label="Contre-Sabotage x1 — 15 000", style=discord.ButtonStyle.secondary, emoji="🛡️")
+    async def buy_contresabo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.acheter(interaction, 15000, "contresabotage_x1", "🛡️ **Contre-Sabotage** obtenu ! Utilise `/tokyo_contresaboter` si tu es saboté.")
 
     @discord.ui.button(label="Discord Nitro — 2 000 000", style=discord.ButtonStyle.danger, emoji="💎")
     async def buy_nitro(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -709,7 +932,7 @@ async def admin_reset(interaction: discord.Interaction):
     save_db(db)
     await interaction.response.send_message("✅ Tirages gratuits remis à 3 pour tout le monde !", ephemeral=True)
 
-@bot.tree.command(name="tokyo_classement", description="🏆 Voir le top 10 des Tokyo Coins")
+@bot.tree.command(name="tokyo_classement", description="🏆 Voir le top 10 des Tokyo Coins (public)")
 async def classement(interaction: discord.Interaction):
     db = load_db()
     if not db:
@@ -720,25 +943,26 @@ async def classement(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Classement — Tokyo Coins", color=0xF1C40F)
 
     for idx, (uid, data) in enumerate(tri):
-        user = bot.get_user(int(uid))
-        if user is None:
+        user_obj = bot.get_user(int(uid))
+        if user_obj is None:
             try:
-                user = await bot.fetch_user(int(uid))
-                nom = user.display_name
+                user_obj = await bot.fetch_user(int(uid))
+                nom = user_obj.display_name
             except Exception:
                 nom = "Joueur inconnu"
         else:
-            nom = user.display_name
+            nom = user_obj.display_name
 
         medaille = ["🥇", "🥈", "🥉"][idx] if idx < 3 else f"**#{idx+1}**"
-        icones_nb = len(data.get("icones", []))
+        tirages = data.get("tirages", 0) + data.get("tirages_stock", 0)
         embed.add_field(
             name=f"{medaille} {nom}",
-            value=f"{data.get('coins', 0):,} coins • {icones_nb} icônes",
+            value=f"{data.get('coins', 0):,} coins • {tirages} tirages",
             inline=False
         )
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ==========================================
 #   SERVEUR WEB POUR RENDER / UPTIMEROBOT
 # ==========================================
