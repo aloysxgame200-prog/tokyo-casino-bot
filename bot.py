@@ -152,7 +152,7 @@ async def before_reset():
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
-    """Détecte quand un membre met ou enlève STATUT_BONUS dans son statut custom."""
+    """Bonus statut : rôle permanent + 2 tirages par jour si statut actif."""
 
     LOG_CHANNEL_ID = 1495821706332344461
 
@@ -175,39 +175,22 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     avait_statut = statut_avant is not None and STATUT_BONUS in statut_avant
     a_statut = statut_apres is not None and STATUT_BONUS in statut_apres
 
+    # ── Pas de nouveau statut détecté → on ignore ──
+    if not a_statut or avait_statut:
+        return
+
+    # ── Le membre VIENT DE METTRE le statut ──
+
     role_soutien = after.guild.get_role(ROLE_SOUTIEN_ID)
     if not role_soutien:
         print("⚠️ Rôle Soutien introuvable.")
         return
 
-    # ── Le membre ENLÈVE le statut → retire le rôle Soutien ──
-    if avait_statut and not a_statut:
-        if role_soutien in after.roles:
-            try:
-                await after.remove_roles(role_soutien, reason="Statut bonus retiré")
-                await after.send(
-                    f"😔 Tu as retiré **{STATUT_BONUS}** de ton statut.\n"
-                    f"Le rôle **Soutien** t'a été retiré. Remets-le pour le récupérer !"
-                )
-                await send_log(
-                    f"🔴 **Rôle Soutien retiré** — {after.mention} (`{after.id}`) "
-                    f"a retiré le statut bonus."
-                )
-            except Exception as e:
-                print(f"Erreur retrait rôle Soutien : {e}")
-        return
-
-    # ── Pas de statut bonus ou déjà présent avant → on ignore ──
-    if not a_statut or avait_statut:
-        return
-
-    # ── Le membre MET le statut pour la première fois ──
-
-    # Donner le rôle Soutien
+    # Donner le rôle Soutien s'il ne l'a pas (permanent, jamais retiré)
     role_donne = False
     if role_soutien not in after.roles:
         try:
-            await after.add_roles(role_soutien, reason="Statut bonus activé")
+            await after.add_roles(role_soutien, reason="Statut bonus activé — rôle permanent")
             role_donne = True
         except Exception as e:
             print(f"Erreur ajout rôle Soutien : {e}")
@@ -217,19 +200,20 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     today = now_local().strftime("%Y-%m-%d")
 
     if user_data.get("dernier_bonus_statut") == today:
-        try:
-            await after.send(
-                f"✅ Rôle **Soutien** récupéré !\n"
-                f"⏳ Mais tu as déjà reçu tes **+2 tirages** aujourd'hui.\n"
-                f"Reviens demain pour les regagner. 🎲"
-            )
-            await send_log(
-                f"🟡 **Quota atteint** — {after.mention} (`{after.id}`) "
-                f"a remis le statut mais avait déjà son bonus du jour."
-                + (" Rôle redonné." if role_donne else "")
-            )
-        except Exception as e:
-            print(f"Erreur envoi MP quota : {e}")
+        # Tirages déjà accordés aujourd'hui
+        if role_donne:
+            try:
+                await after.send(
+                    f"🏅 Rôle **Soutien** obtenu définitivement !\n"
+                    f"⏳ Mais tu as déjà reçu tes **+2 tirages** aujourd'hui.\n"
+                    f"Remets le statut demain pour les regagner. 🎲"
+                )
+                await send_log(
+                    f"🟡 **Rôle donné / quota atteint** — {after.mention} (`{after.id}`) "
+                    f"a le statut mais avait déjà son bonus du jour. Rôle accordé définitivement."
+                )
+            except Exception as e:
+                print(f"Erreur envoi MP : {e}")
         return
 
     # Accorder les 2 tirages bonus
@@ -243,21 +227,20 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
         await after.send(
             f"🎉 **Bonus statut activé !**\n"
             f"Tu as mis **{STATUT_BONUS}** dans ton statut !\n\n"
-            f"🏅 Rôle **Soutien** obtenu !\n"
-            f"🎲 **+2 tirages** ajoutés ! (Total : **{tirages_total}**)\n\n"
-            f"_(Le bonus tirages est disponible une seule fois par jour)_"
+            + (f"🏅 Rôle **Soutien** obtenu définitivement !\n" if role_donne else "")
+            + f"🎲 **+2 tirages** ajoutés ! (Total : **{tirages_total}**)\n\n"
+            f"_(Remets le statut demain pour regagner +2 tirages)_"
         )
     except Exception as e:
         print(f"Erreur envoi MP bonus : {e}")
 
     await send_log(
         f"🟢 **Bonus accordé** — {after.mention} (`{after.id}`) "
-        f"a activé le statut bonus. "
-        f"+2 tirages (total stock : {user_data['tirages_stock']})"
-        + (" | Rôle Soutien donné." if role_donne else " | Avait déjà le rôle.")
+        f"a activé le statut. +2 tirages (stock : {user_data['tirages_stock']})"
+        + (" | Rôle Soutien donné définitivement." if role_donne else " | Avait déjà le rôle.")
     )
 
-    print(f"🎁 Bonus statut + rôle Soutien accordé à {after.display_name} ({after.id})")
+    print(f"🎁 Bonus tirages accordé à {after.display_name} ({after.id})")
 
 # ==========================================
 #   PROBABILITÉS DE TIRAGE
