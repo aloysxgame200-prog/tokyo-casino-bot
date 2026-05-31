@@ -19,6 +19,7 @@ SALON_AUTORISE = 1495152917890732172
 OWNER_ID = 1022218025539223695
 TIMEZONE = pytz.timezone("Europe/Paris")
 STATUT_BONUS = "/UGhTMZAA3t"
+ROLE_SOUTIEN_ID = 1510607830812594207
 
 intents = discord.Intents.default()
 intents.members = True
@@ -151,9 +152,8 @@ async def before_reset():
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
-    """Détecte quand un membre met /UGhTMZAA3t dans son statut custom."""
+    """Détecte quand un membre met ou enlève /UGhTMZAA3t dans son statut custom."""
 
-    # Récupérer le statut custom avant et après
     def get_custom_status(member: discord.Member) -> str | None:
         for activity in member.activities:
             if isinstance(activity, discord.CustomActivity):
@@ -163,27 +163,48 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     statut_avant = get_custom_status(before)
     statut_apres = get_custom_status(after)
 
-    # Le statut bonus doit apparaître dans le nouveau statut mais pas dans l'ancien
-    # (pour éviter de le déclencher à chaque mise à jour de présence sans changement de statut)
     avait_statut = statut_avant is not None and STATUT_BONUS in statut_avant
     a_statut = statut_apres is not None and STATUT_BONUS in statut_apres
 
+    role_soutien = after.guild.get_role(ROLE_SOUTIEN_ID)
+
+    # ── Le membre ENLÈVE le statut → on retire le rôle Soutien ──
+    if avait_statut and not a_statut:
+        if role_soutien and role_soutien in after.roles:
+            try:
+                await after.remove_roles(role_soutien, reason="Statut bonus retiré")
+                await after.send(
+                    f"😔 Tu as retiré **{STATUT_BONUS}** de ton statut.\n"
+                    f"Le rôle **Soutien** t'a été retiré. Remets-le pour le récupérer !"
+                )
+            except Exception:
+                pass
+        return
+
+    # ── Le membre MET le statut → tirages + rôle Soutien ──
     if not a_statut:
         return  # Pas le bon statut, on ignore
-
     if avait_statut:
-        return  # Il avait déjà le statut avant, pas un nouveau changement
+        return  # Il avait déjà le statut, pas un nouveau changement
 
-    # Le membre vient de mettre le statut bonus → vérifier le quota journalier
+    # Donner le rôle Soutien s'il ne l'a pas déjà
+    if role_soutien and role_soutien not in after.roles:
+        try:
+            await after.add_roles(role_soutien, reason="Statut bonus activé")
+        except Exception as e:
+            print(f"Erreur ajout rôle Soutien : {e}")
+
+    # Vérifier le quota journalier pour les tirages
     user_data = get_user(str(after.id))
     today = now_local().strftime("%Y-%m-%d")
 
     if user_data.get("dernier_bonus_statut") == today:
-        # Bonus déjà accordé aujourd'hui → on envoie un DM discret
+        # Bonus tirages déjà accordé aujourd'hui mais on donne quand même le rôle
         try:
             await after.send(
-                f"⏳ Tu as déjà reçu ton bonus de statut aujourd'hui !\n"
-                f"Reviens demain pour gagner **+2 tirages** à nouveau. 🎲"
+                f"✅ Rôle **Soutien** récupéré !\n"
+                f"⏳ Mais tu as déjà reçu tes **+2 tirages** aujourd'hui.\n"
+                f"Reviens demain pour les regagner. 🎲"
             )
         except Exception:
             pass
@@ -199,14 +220,15 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     try:
         await after.send(
             f"🎉 **Bonus statut activé !**\n"
-            f"Tu as mis **{STATUT_BONUS}** dans ton statut et tu reçois **+2 tirages** !\n\n"
-            f"🎲 Tirages disponibles : **{tirages_total}**\n"
-            f"_(Ce bonus est disponible une seule fois par jour)_"
+            f"Tu as mis **{STATUT_BONUS}** dans ton statut !\n\n"
+            f"🏅 Rôle **Soutien** obtenu !\n"
+            f"🎲 **+2 tirages** ajoutés ! (Total : **{tirages_total}**)\n\n"
+            f"_(Le bonus tirages est disponible une seule fois par jour)_"
         )
     except Exception:
         pass
 
-    print(f"🎁 Bonus statut accordé à {after.display_name} ({after.id})")
+    print(f"🎁 Bonus statut + rôle Soutien accordé à {after.display_name} ({after.id})")
 
 # ==========================================
 #   PROBABILITÉS DE TIRAGE
