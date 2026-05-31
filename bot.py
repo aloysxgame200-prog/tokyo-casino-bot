@@ -18,10 +18,12 @@ TOKEN = os.environ.get("TOKEN")
 SALON_AUTORISE = 1495152917890732172
 OWNER_ID = 1022218025539223695
 TIMEZONE = pytz.timezone("Europe/Paris")
+STATUT_BONUS = "/UGhTMZAA3t"
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.presences = True  # ← nécessaire pour détecter les statuts
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -67,7 +69,7 @@ def save_db(data: dict):
 def _default_user() -> dict:
     return {
         "coins": 500,
-        "tirages": 3,
+        "tirages": 1,           # ← modifié : 1 tirage de départ (au lieu de 3)
         "tirages_stock": 0,
         "pillages": 0,
         "sabotages": 0,
@@ -76,6 +78,7 @@ def _default_user() -> dict:
         "sabotages_total": 0,
         "sabote_jusqu": None,
         "dernier_reset": None,
+        "dernier_bonus_statut": None,   # ← nouveau : date du dernier bonus statut
         "duels_gagnes": 0,
         "duels_perdus": 0,
     }
@@ -87,7 +90,6 @@ def get_user(user_id: str) -> dict:
         db[uid] = _default_user()
         save_db(db)
     u = db[uid]
-    # migration : champs manquants pour anciens comptes
     changed = False
     for k, v in _default_user().items():
         if k not in u:
@@ -127,10 +129,10 @@ async def reset_tirages_minuit():
     db = load_db()
     today = now_local().strftime("%Y-%m-%d")
     for uid in db:
-        db[uid]["tirages"] = 3
+        db[uid]["tirages"] = 1          # ← modifié : 1 tirage gratuit par jour
         db[uid]["dernier_reset"] = today
     save_db(db)
-    print(f"✅ Tirages remis à 3 pour tous les joueurs ({today})")
+    print(f"✅ Tirages remis à 1 pour tous les joueurs ({today})")
 
 @reset_tirages_minuit.before_loop
 async def before_reset():
@@ -144,15 +146,77 @@ async def before_reset():
     await discord.utils.sleep_until(minuit)
 
 # ==========================================
+#   DÉTECTION DU STATUT BONUS
+# ==========================================
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    """Détecte quand un membre met /UGhTMZAA3t dans son statut custom."""
+
+    # Récupérer le statut custom avant et après
+    def get_custom_status(member: discord.Member) -> str | None:
+        for activity in member.activities:
+            if isinstance(activity, discord.CustomActivity):
+                return activity.name or ""
+        return None
+
+    statut_avant = get_custom_status(before)
+    statut_apres = get_custom_status(after)
+
+    # Le statut bonus doit apparaître dans le nouveau statut mais pas dans l'ancien
+    # (pour éviter de le déclencher à chaque mise à jour de présence sans changement de statut)
+    avait_statut = statut_avant is not None and STATUT_BONUS in statut_avant
+    a_statut = statut_apres is not None and STATUT_BONUS in statut_apres
+
+    if not a_statut:
+        return  # Pas le bon statut, on ignore
+
+    if avait_statut:
+        return  # Il avait déjà le statut avant, pas un nouveau changement
+
+    # Le membre vient de mettre le statut bonus → vérifier le quota journalier
+    user_data = get_user(str(after.id))
+    today = now_local().strftime("%Y-%m-%d")
+
+    if user_data.get("dernier_bonus_statut") == today:
+        # Bonus déjà accordé aujourd'hui → on envoie un DM discret
+        try:
+            await after.send(
+                f"⏳ Tu as déjà reçu ton bonus de statut aujourd'hui !\n"
+                f"Reviens demain pour gagner **+2 tirages** à nouveau. 🎲"
+            )
+        except Exception:
+            pass
+        return
+
+    # Accorder les 2 tirages bonus
+    user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + 2
+    user_data["dernier_bonus_statut"] = today
+    save_user(str(after.id), user_data)
+
+    tirages_total = user_data.get("tirages", 0) + user_data.get("tirages_stock", 0)
+
+    try:
+        await after.send(
+            f"🎉 **Bonus statut activé !**\n"
+            f"Tu as mis **{STATUT_BONUS}** dans ton statut et tu reçois **+2 tirages** !\n\n"
+            f"🎲 Tirages disponibles : **{tirages_total}**\n"
+            f"_(Ce bonus est disponible une seule fois par jour)_"
+        )
+    except Exception:
+        pass
+
+    print(f"🎁 Bonus statut accordé à {after.display_name} ({after.id})")
+
+# ==========================================
 #   PROBABILITÉS DE TIRAGE
-#   Paliers coins : 0-500 / 501-1000 / 1001-2000 / 2001-2500
 # ==========================================
 
 TIRAGES_TABLE: list[tuple[str, float, str]] = [
-    ("coins_tier1",  20.00, "coins"),   # 0–500
-    ("coins_tier2",  15.00, "coins"),   # 501–1 000
-    ("coins_tier3",  10.00, "coins"),   # 1 001–2 000
-    ("coins_tier4",   5.00, "coins"),   # 2 001–2 500
+    ("coins_tier1",  20.00, "coins"),
+    ("coins_tier2",  15.00, "coins"),
+    ("coins_tier3",  10.00, "coins"),
+    ("coins_tier4",   5.00, "coins"),
     ("Rien",         18.00, "rien"),
     ("Pillage",       7.00, "pillage"),
     ("Tirages x5",    5.00, "tirages"),
@@ -182,7 +246,6 @@ def faire_tirage() -> tuple[str, str]:
     return "rien", "Rien"
 
 def faire_tirage_duel() -> tuple[str, int]:
-    """Tirage spécial pour le duel — retourne (label, coins) uniquement coins/rien."""
     cat, nom = faire_tirage()
     if cat == "coins":
         lo, hi = COINS_PALIERS[nom]
@@ -255,7 +318,7 @@ async def tokyo(interaction: discord.Interaction):
         return
 
     user = get_user(str(interaction.user.id))
-    tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
+    tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
 
     embed = discord.Embed(title="🎰 Tokyo FR Casino", color=0xFF4444)
     embed.description = (
@@ -267,11 +330,11 @@ async def tokyo(interaction: discord.Interaction):
         "**⚔️ Duel** — Défie un membre\n"
         "**🏆 Classement** — Top 10 coins"
     )
-    embed.set_footer(text="3 tirages gratuits par jour • Remis à zéro à minuit (heure de Paris)")
+    embed.set_footer(text="1 tirage gratuit par jour • Mets /UGhTMZAA3t en statut pour +2 tirages !")
     await interaction.response.send_message(embed=embed, view=MenuPrincipal(), ephemeral=True)
 
 # ==========================================
-#   /tokyo_piller — vole TOUS les tirages
+#   /tokyo_piller
 # ==========================================
 
 @bot.tree.command(name="tokyo_piller", description="🗡️ Vole tous les tirages d'un membre (nécessite un Pillage)")
@@ -305,7 +368,6 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
         )
         return
 
-    # On vole tous les tirages (daily + stock)
     victime["tirages"] = 0
     victime["tirages_stock"] = 0
     voleur["tirages_stock"] = voleur.get("tirages_stock", 0) + tirages_voles
@@ -424,10 +486,9 @@ async def contresaboter(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
-#   DUELS EN ATTENTE (mémoire globale)
+#   DUELS EN ATTENTE
 # ==========================================
 
-# duel_en_attente[challenger_id] = {"cible_id": int, "message_id": int, "channel_id": int}
 duel_en_attente: dict[int, dict] = {}
 
 # ==========================================
@@ -454,7 +515,6 @@ async def duel_cmd(interaction: discord.Interaction, cible: discord.Member):
         )
         return
 
-    # Envoi de la demande en DM à la cible
     try:
         dm_embed = discord.Embed(title="⚔️ Défi de Duel !", color=0xFF4444)
         dm_embed.description = (
@@ -465,9 +525,8 @@ async def duel_cmd(interaction: discord.Interaction, cible: discord.Member):
         )
         await cible.send(embed=dm_embed)
     except Exception:
-        pass  # DM désactivé, tant pis
+        pass
 
-    # On enregistre le duel en attente
     duel_en_attente[interaction.user.id] = {
         "cible_id": cible.id,
         "expire": (now_local() + timedelta(minutes=5)).isoformat(),
@@ -490,11 +549,9 @@ async def accepter_duel(interaction: discord.Interaction):
     if not await check_salon(interaction):
         return
 
-    # Chercher un duel où la cible = interaction.user.id
     challenger_id = None
     for cid, info in list(duel_en_attente.items()):
         if info["cible_id"] == interaction.user.id:
-            # Vérifier expiration
             if now_local() > datetime.fromisoformat(info["expire"]):
                 del duel_en_attente[cid]
                 await interaction.response.send_message(
@@ -516,7 +573,6 @@ async def accepter_duel(interaction: discord.Interaction):
     challenger_data = get_user(str(challenger_id))
     cible_data = get_user(str(cible_id))
 
-    # Vérifier tirages des deux
     tirages_c = challenger_data.get("tirages", 0) + challenger_data.get("tirages_stock", 0)
     tirages_ci = cible_data.get("tirages", 0) + cible_data.get("tirages_stock", 0)
 
@@ -531,7 +587,6 @@ async def accepter_duel(interaction: discord.Interaction):
         )
         return
 
-    # Déduire la mise des deux joueurs
     def deduire_tirages(data: dict, nb: int):
         stock = data.get("tirages_stock", 0)
         daily = data.get("tirages", 0)
@@ -551,13 +606,11 @@ async def accepter_duel(interaction: discord.Interaction):
         ephemeral=True
     )
 
-    # Effectuer les 3 tirages pour chacun
     async def effectuer_3_tirages():
         resultats_c = []
         resultats_ci = []
         score_c = 0
         score_ci = 0
-
         for _ in range(3):
             label_c, val_c = faire_tirage_duel()
             label_ci, val_ci = faire_tirage_duel()
@@ -566,12 +619,10 @@ async def accepter_duel(interaction: discord.Interaction):
             score_c += val_c
             score_ci += val_ci
             await asyncio.sleep(1.2)
-
         return resultats_c, resultats_ci, score_c, score_ci
 
     resultats_c, resultats_ci, score_c, score_ci = await effectuer_3_tirages()
 
-    # Déterminer le gagnant
     if score_c > score_ci:
         gagnant_id = challenger_id
         perdant_id = cible_id
@@ -579,20 +630,18 @@ async def accepter_duel(interaction: discord.Interaction):
         gagnant_id = cible_id
         perdant_id = challenger_id
     else:
-        gagnant_id = None  # Égalité
+        gagnant_id = None
 
     gagnant_data = get_user(str(gagnant_id)) if gagnant_id else None
     perdant_data = get_user(str(perdant_id)) if gagnant_id else None
 
     if gagnant_id:
-        # Le gagnant récupère 6 tirages
         gagnant_data["tirages_stock"] = gagnant_data.get("tirages_stock", 0) + 6
         gagnant_data["duels_gagnes"] = gagnant_data.get("duels_gagnes", 0) + 1
         perdant_data["duels_perdus"] = perdant_data.get("duels_perdus", 0) + 1
         save_user(str(gagnant_id), gagnant_data)
         save_user(str(perdant_id), perdant_data)
     else:
-        # Égalité : on rembourse les 3 tirages à chacun
         challenger_data = get_user(str(challenger_id))
         cible_data = get_user(str(cible_id))
         challenger_data["tirages_stock"] = challenger_data.get("tirages_stock", 0) + 3
@@ -600,7 +649,6 @@ async def accepter_duel(interaction: discord.Interaction):
         save_user(str(challenger_id), challenger_data)
         save_user(str(cible_id), cible_data)
 
-    # Récupérer les noms
     try:
         challenger_user = await bot.fetch_user(challenger_id)
         nom_c = challenger_user.display_name
@@ -609,7 +657,6 @@ async def accepter_duel(interaction: discord.Interaction):
 
     nom_ci = interaction.user.display_name
 
-    # Construction du résultat côte à côte
     def ligne_tirage(label: str, val: int) -> str:
         return f"`{label}`"
 
@@ -640,10 +687,8 @@ async def accepter_duel(interaction: discord.Interaction):
     )
     embed.add_field(name="─" * 30, value=conclusion, inline=False)
 
-    # Envoyer les résultats aux deux joueurs en ephemeral
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # Envoyer aussi au challenger par DM (pas d'autre moyen en full ephemeral)
     try:
         challenger_user = await bot.fetch_user(challenger_id)
         await challenger_user.send(embed=embed)
@@ -661,7 +706,9 @@ class MenuPrincipal(discord.ui.View):
     @discord.ui.button(label="Profil", style=discord.ButtonStyle.secondary, emoji="💰")
     async def profil(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = get_user(str(interaction.user.id))
-        tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
+        tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
+        today = now_local().strftime("%Y-%m-%d")
+        bonus_statut_dispo = user.get("dernier_bonus_statut") != today
 
         embed = discord.Embed(title=f"💰 Profil de {interaction.user.display_name}", color=0x5865F2)
         embed.add_field(name="Tokyo Coins", value=f"**{user['coins']:,}** 💰", inline=True)
@@ -670,6 +717,11 @@ class MenuPrincipal(discord.ui.View):
         embed.add_field(name="Sabotages", value=f"**{user.get('sabotages', 0)}** 🔥", inline=True)
         embed.add_field(name="Contre-Sabotages", value=f"**{user.get('contre_sabotages', 0)}** 🛡️", inline=True)
         embed.add_field(name="Duels", value=f"**{user.get('duels_gagnes', 0)}W / {user.get('duels_perdus', 0)}L** ⚔️", inline=True)
+        embed.add_field(
+            name="Bonus statut aujourd'hui",
+            value="✅ Disponible" if bonus_statut_dispo else "❌ Déjà récupéré",
+            inline=True
+        )
 
         if est_sabote(user):
             embed.add_field(
@@ -684,7 +736,7 @@ class MenuPrincipal(discord.ui.View):
     @discord.ui.button(label="Tirage", style=discord.ButtonStyle.primary, emoji="🎲")
     async def tirage(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = get_user(str(interaction.user.id))
-        tirages_dispo = user.get("tirages", 3) + user.get("tirages_stock", 0)
+        tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
         embed = discord.Embed(title="🎲 Tirages", color=0xFF8C00)
         embed.description = (
             "**Comment ça marche ?**\n"
@@ -699,7 +751,8 @@ class MenuPrincipal(discord.ui.View):
             "🎲 **Tirages x5** — Bonus de tirages\n"
             "🔥 **Sabotage** — Bloque quelqu'un 24h\n\n"
             f"Tu as **{tirages_dispo} tirage(s)** disponible(s).\n"
-            "_(3 tirages gratuits par jour, remis à zéro à minuit)_"
+            "_(1 tirage gratuit par jour, remis à zéro à minuit)_\n"
+            f"_💡 Mets **{STATUT_BONUS}** en statut Discord pour +2 tirages/jour !_"
         )
         await interaction.response.send_message(embed=embed, view=VueTirage(), ephemeral=True)
 
@@ -785,17 +838,17 @@ class VueTirage(discord.ui.View):
             )
             return
 
-        tirages_dispo = user_data.get("tirages", 3) + user_data.get("tirages_stock", 0)
+        tirages_dispo = user_data.get("tirages", 1) + user_data.get("tirages_stock", 0)
         if tirages_dispo < nb:
             await interaction.response.send_message(
                 f"❌ Tu n'as que **{tirages_dispo}** tirage(s) disponible(s) !\n"
-                "└ Attends demain pour les tirages gratuits, ou achète-en dans le Shop.",
+                "└ Attends demain pour ton tirage gratuit, ou achète-en dans le Shop.",
                 ephemeral=True
             )
             return
 
         stock = user_data.get("tirages_stock", 0)
-        daily = user_data.get("tirages", 3)
+        daily = user_data.get("tirages", 1)
         used_stock = min(nb, stock)
         used_daily = nb - used_stock
         user_data["tirages_stock"] = stock - used_stock
@@ -923,14 +976,14 @@ async def admin_tirages(interaction: discord.Interaction, membre: discord.Member
         ephemeral=True
     )
 
-@bot.tree.command(name="tokyo_admin_reset_tirages", description="[ADMIN] Remet les tirages gratuits à 3 pour tout le monde")
+@bot.tree.command(name="tokyo_admin_reset_tirages", description="[ADMIN] Remet les tirages gratuits à 1 pour tout le monde")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def admin_reset(interaction: discord.Interaction):
     db = load_db()
     for uid in db:
-        db[uid]["tirages"] = 3
+        db[uid]["tirages"] = 1
     save_db(db)
-    await interaction.response.send_message("✅ Tirages gratuits remis à 3 pour tout le monde !", ephemeral=True)
+    await interaction.response.send_message("✅ Tirages gratuits remis à 1 pour tout le monde !", ephemeral=True)
 
 @bot.tree.command(name="tokyo_classement", description="🏆 Voir le top 10 des Tokyo Coins (public)")
 async def classement(interaction: discord.Interaction):
