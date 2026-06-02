@@ -6,8 +6,6 @@ import random
 import asyncio
 import pytz
 from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 
 # ==========================================
 #   TOKYO FR CASINO - Bot Principal
