@@ -5,6 +5,7 @@ import os
 import random
 import asyncio
 import pytz
+import aiosqlite                         # ← MODIF : remplace data.json
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -18,11 +19,12 @@ OWNER_ID = 1022218025539223695
 TIMEZONE = pytz.timezone("Europe/Paris")
 STATUT_BONUS = "/UGhTMZAA3t"
 ROLE_SOUTIEN_ID = 1510607830812594207
+ROLE_TOKYO_ID = 1511724557189513237      # ← MODIF : rôle donné au /tokyo
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-intents.presences = True  # ← nécessaire pour détecter les statuts
+intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -40,69 +42,63 @@ async def check_salon(interaction: discord.Interaction) -> bool:
     return True
 
 # ==========================================
-#   BASE DE DONNÉES (cache en mémoire)
+#   BASE DE DONNÉES SQLite (aiosqlite)     ← MODIF : tout ce bloc remplace data.json
 # ==========================================
 
-DB_FILE = "data.json"
-_db_cache: dict | None = None
+DB_FILE = "casino.db"
 
-def load_db() -> dict:
-    global _db_cache
-    if _db_cache is not None:
-        return _db_cache
-    if not os.path.exists(DB_FILE):
-        _db_cache = {}
-        return _db_cache
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        _db_cache = json.load(f)
-    return _db_cache
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                coins INTEGER DEFAULT 500,
+                tirages INTEGER DEFAULT 1,
+                tirages_stock INTEGER DEFAULT 0,
+                pillages INTEGER DEFAULT 0,
+                sabotages INTEGER DEFAULT 0,
+                contre_sabotages INTEGER DEFAULT 0,
+                pillages_total INTEGER DEFAULT 0,
+                sabotages_total INTEGER DEFAULT 0,
+                sabote_jusqu TEXT DEFAULT NULL,
+                dernier_reset TEXT DEFAULT NULL,
+                dernier_bonus_statut TEXT DEFAULT NULL,
+                duels_gagnes INTEGER DEFAULT 0,
+                duels_perdus INTEGER DEFAULT 0
+            )
+        """)
+        await db.commit()
 
-def save_db(data: dict):
-    global _db_cache
-    _db_cache = data
-    temp_file = DB_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(temp_file, DB_FILE)
+async def get_user(user_id: str) -> dict:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (str(user_id),)) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (str(user_id),))
+            await db.commit()
+            async with db.execute("SELECT * FROM users WHERE user_id = ?", (str(user_id),)) as cursor:
+                row = await cursor.fetchone()
+        return dict(row)
 
-def _default_user() -> dict:
-    return {
-        "coins": 500,
-        "tirages": 1,           # ← modifié : 1 tirage de départ (au lieu de 3)
-        "tirages_stock": 0,
-        "pillages": 0,
-        "sabotages": 0,
-        "contre_sabotages": 0,
-        "pillages_total": 0,
-        "sabotages_total": 0,
-        "sabote_jusqu": None,
-        "dernier_reset": None,
-        "dernier_bonus_statut": None,   # ← nouveau : date du dernier bonus statut
-        "duels_gagnes": 0,
-        "duels_perdus": 0,
-    }
+async def save_user(user_id: str, data: dict):
+    data.pop("user_id", None)
+    cols = ", ".join(f"{k} = ?" for k in data.keys())
+    vals = list(data.values()) + [str(user_id)]
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(f"UPDATE users SET {cols} WHERE user_id = ?", vals)
+        await db.commit()
 
-def get_user(user_id: str) -> dict:
-    db = load_db()
-    uid = str(user_id)
-    if uid not in db:
-        db[uid] = _default_user()
-        save_db(db)
-    u = db[uid]
-    changed = False
-    for k, v in _default_user().items():
-        if k not in u:
-            u[k] = v
-            changed = True
-    if changed:
-        db[uid] = u
-        save_db(db)
-    return u
+async def load_all_users() -> dict:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users") as cursor:
+            rows = await cursor.fetchall()
+    return {row["user_id"]: dict(row) for row in rows}
 
-def save_user(user_id: str, data: dict):
-    db = load_db()
-    db[str(user_id)] = data
-    save_db(db)
+# ==========================================
+#   HELPERS
+# ==========================================
 
 def now_local() -> datetime:
     return datetime.now(TIMEZONE)
@@ -125,12 +121,10 @@ def temps_restant_sabotage(user_data: dict) -> str:
 
 @tasks.loop(hours=24)
 async def reset_tirages_minuit():
-    db = load_db()
     today = now_local().strftime("%Y-%m-%d")
-    for uid in db:
-        db[uid]["tirages"] = 1          # ← modifié : 1 tirage gratuit par jour
-        db[uid]["dernier_reset"] = today
-    save_db(db)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET tirages = 1, dernier_reset = ?", (today,))
+        await db.commit()
     print(f"✅ Tirages remis à 1 pour tous les joueurs ({today})")
 
 @reset_tirages_minuit.before_loop
@@ -150,8 +144,6 @@ async def before_reset():
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
-    """Bonus statut : rôle permanent + 2 tirages par jour si statut actif."""
-
     LOG_CHANNEL_ID = 1495821706332344461
 
     async def send_log(message: str):
@@ -173,18 +165,14 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     avait_statut = statut_avant is not None and STATUT_BONUS in statut_avant
     a_statut = statut_apres is not None and STATUT_BONUS in statut_apres
 
-    # ── Pas de nouveau statut détecté → on ignore ──
     if not a_statut or avait_statut:
         return
-
-    # ── Le membre VIENT DE METTRE le statut ──
 
     role_soutien = after.guild.get_role(ROLE_SOUTIEN_ID)
     if not role_soutien:
         print("⚠️ Rôle Soutien introuvable.")
         return
 
-    # Donner le rôle Soutien s'il ne l'a pas (permanent, jamais retiré)
     role_donne = False
     if role_soutien not in after.roles:
         try:
@@ -193,12 +181,10 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
         except Exception as e:
             print(f"Erreur ajout rôle Soutien : {e}")
 
-    # Vérifier le quota journalier pour les tirages
-    user_data = get_user(str(after.id))
+    user_data = await get_user(str(after.id))
     today = now_local().strftime("%Y-%m-%d")
 
     if user_data.get("dernier_bonus_statut") == today:
-        # Tirages déjà accordés aujourd'hui
         if role_donne:
             try:
                 await after.send(
@@ -214,10 +200,9 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
                 print(f"Erreur envoi MP : {e}")
         return
 
-    # Accorder les 2 tirages bonus
     user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + 2
     user_data["dernier_bonus_statut"] = today
-    save_user(str(after.id), user_data)
+    await save_user(str(after.id), user_data)
 
     tirages_total = user_data.get("tirages", 0) + user_data["tirages_stock"]
 
@@ -237,8 +222,6 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
         f"a activé le statut. +2 tirages (stock : {user_data['tirages_stock']})"
         + (" | Rôle Soutien donné définitivement." if role_donne else " | Avait déjà le rôle.")
     )
-
-    print(f"🎁 Bonus tirages accordé à {after.display_name} ({after.id})")
 
 # ==========================================
 #   PROBABILITÉS DE TIRAGE
@@ -300,11 +283,9 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str
         user_data["coins"] = user_data.get("coins", 0) + montant
         msg = f"💰 **{montant:,} Tokyo Coins** tombent dans ta poche !"
         return user_data, msg, montant
-
     elif categorie == "rien":
         msg = "😔 **Rien** cette fois... La chance te sourira au prochain tirage !"
         return user_data, msg, 0
-
     elif categorie == "pillage":
         user_data["pillages"] = user_data.get("pillages", 0) + 1
         msg = (
@@ -312,12 +293,10 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str
             "└ Utilise `/tokyo_piller @quelquun` pour lui voler **tous ses tirages**."
         )
         return user_data, msg, 0
-
     elif categorie == "tirages":
         user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + 5
         msg = "🎲 **5 tirages bonus** ajoutés à ton compteur !"
         return user_data, msg, 0
-
     elif categorie == "sabotage":
         user_data["sabotages"] = user_data.get("sabotages", 0) + 1
         msg = (
@@ -325,7 +304,6 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str
             "└ Utilise `/tokyo_saboter @quelquun` pour bloquer tous ses tirages pendant **24 heures**."
         )
         return user_data, msg, 0
-
     return user_data, "❓ Résultat inconnu.", 0
 
 # ==========================================
@@ -334,6 +312,7 @@ def appliquer_gain(user_data: dict, categorie: str, nom: str) -> tuple[dict, str
 
 @bot.event
 async def on_ready():
+    await init_db()                      # ← MODIF : initialise la DB au démarrage
     await bot.tree.sync()
     if not reset_tirages_minuit.is_running():
         reset_tirages_minuit.start()
@@ -349,7 +328,16 @@ async def tokyo(interaction: discord.Interaction):
     if not await check_salon(interaction):
         return
 
-    user = get_user(str(interaction.user.id))
+    # ← MODIF : donner le rôle Tokyo automatiquement
+    role_tokyo = interaction.guild.get_role(ROLE_TOKYO_ID) if interaction.guild else None
+    if role_tokyo and isinstance(interaction.user, discord.Member):
+        if role_tokyo not in interaction.user.roles:
+            try:
+                await interaction.user.add_roles(role_tokyo, reason="Commande /tokyo utilisée")
+            except Exception as e:
+                print(f"Erreur ajout rôle Tokyo : {e}")
+
+    user = await get_user(str(interaction.user.id))
     tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
 
     embed = discord.Embed(title="🎰 Tokyo FR Casino", color=0xFF4444)
@@ -380,8 +368,8 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
         await interaction.response.send_message("❌ Tu ne peux pas piller un bot !", ephemeral=True)
         return
 
-    voleur = get_user(str(interaction.user.id))
-    victime = get_user(str(cible.id))
+    voleur = await get_user(str(interaction.user.id))
+    victime = await get_user(str(cible.id))
 
     if voleur.get("pillages", 0) <= 0:
         await interaction.response.send_message(
@@ -406,8 +394,8 @@ async def piller(interaction: discord.Interaction, cible: discord.Member):
     voleur["pillages"] -= 1
     voleur["pillages_total"] = voleur.get("pillages_total", 0) + 1
 
-    save_user(str(interaction.user.id), voleur)
-    save_user(str(cible.id), victime)
+    await save_user(str(interaction.user.id), voleur)
+    await save_user(str(cible.id), victime)
 
     embed = discord.Embed(title="🗡️ Pillage réussi !", color=0xE74C3C)
     embed.description = (
@@ -440,8 +428,8 @@ async def saboter(interaction: discord.Interaction, cible: discord.Member):
         await interaction.response.send_message("❌ Tu ne peux pas saboter un bot !", ephemeral=True)
         return
 
-    saboteur = get_user(str(interaction.user.id))
-    victime = get_user(str(cible.id))
+    saboteur = await get_user(str(interaction.user.id))
+    victime = await get_user(str(cible.id))
 
     if saboteur.get("sabotages", 0) <= 0:
         await interaction.response.send_message(
@@ -462,8 +450,8 @@ async def saboter(interaction: discord.Interaction, cible: discord.Member):
     saboteur["sabotages"] -= 1
     saboteur["sabotages_total"] = saboteur.get("sabotages_total", 0) + 1
 
-    save_user(str(interaction.user.id), saboteur)
-    save_user(str(cible.id), victime)
+    await save_user(str(interaction.user.id), saboteur)
+    await save_user(str(cible.id), victime)
 
     embed = discord.Embed(title="🔥 Sabotage posé !", color=0xFF6B35)
     embed.description = (
@@ -489,7 +477,7 @@ async def contresaboter(interaction: discord.Interaction):
     if not await check_salon(interaction):
         return
 
-    user_data = get_user(str(interaction.user.id))
+    user_data = await get_user(str(interaction.user.id))
 
     if user_data.get("contre_sabotages", 0) <= 0:
         await interaction.response.send_message(
@@ -508,7 +496,7 @@ async def contresaboter(interaction: discord.Interaction):
 
     user_data["sabote_jusqu"] = None
     user_data["contre_sabotages"] -= 1
-    save_user(str(interaction.user.id), user_data)
+    await save_user(str(interaction.user.id), user_data)
 
     embed = discord.Embed(title="🛡️ Sabotage annulé !", color=0x2ECC71)
     embed.description = (
@@ -538,7 +526,7 @@ async def duel_cmd(interaction: discord.Interaction, cible: discord.Member):
         await interaction.response.send_message("❌ Tu ne peux pas défier un bot !", ephemeral=True)
         return
 
-    challenger = get_user(str(interaction.user.id))
+    challenger = await get_user(str(interaction.user.id))
     tirages_c = challenger.get("tirages", 0) + challenger.get("tirages_stock", 0)
     if tirages_c < 3:
         await interaction.response.send_message(
@@ -602,8 +590,8 @@ async def accepter_duel(interaction: discord.Interaction):
     del duel_en_attente[challenger_id]
 
     cible_id = interaction.user.id
-    challenger_data = get_user(str(challenger_id))
-    cible_data = get_user(str(cible_id))
+    challenger_data = await get_user(str(challenger_id))
+    cible_data = await get_user(str(cible_id))
 
     tirages_c = challenger_data.get("tirages", 0) + challenger_data.get("tirages_stock", 0)
     tirages_ci = cible_data.get("tirages", 0) + cible_data.get("tirages_stock", 0)
@@ -630,8 +618,8 @@ async def accepter_duel(interaction: discord.Interaction):
 
     challenger_data = deduire_tirages(challenger_data, 3)
     cible_data = deduire_tirages(cible_data, 3)
-    save_user(str(challenger_id), challenger_data)
-    save_user(str(cible_id), cible_data)
+    await save_user(str(challenger_id), challenger_data)
+    await save_user(str(cible_id), cible_data)
 
     await interaction.response.send_message(
         "⚔️ **Duel en cours...** Les tirages se déroulent, résultats dans quelques secondes !",
@@ -664,22 +652,21 @@ async def accepter_duel(interaction: discord.Interaction):
     else:
         gagnant_id = None
 
-    gagnant_data = get_user(str(gagnant_id)) if gagnant_id else None
-    perdant_data = get_user(str(perdant_id)) if gagnant_id else None
-
     if gagnant_id:
+        gagnant_data = await get_user(str(gagnant_id))
+        perdant_data = await get_user(str(perdant_id))
         gagnant_data["tirages_stock"] = gagnant_data.get("tirages_stock", 0) + 6
         gagnant_data["duels_gagnes"] = gagnant_data.get("duels_gagnes", 0) + 1
         perdant_data["duels_perdus"] = perdant_data.get("duels_perdus", 0) + 1
-        save_user(str(gagnant_id), gagnant_data)
-        save_user(str(perdant_id), perdant_data)
+        await save_user(str(gagnant_id), gagnant_data)
+        await save_user(str(perdant_id), perdant_data)
     else:
-        challenger_data = get_user(str(challenger_id))
-        cible_data = get_user(str(cible_id))
+        challenger_data = await get_user(str(challenger_id))
+        cible_data = await get_user(str(cible_id))
         challenger_data["tirages_stock"] = challenger_data.get("tirages_stock", 0) + 3
         cible_data["tirages_stock"] = cible_data.get("tirages_stock", 0) + 3
-        save_user(str(challenger_id), challenger_data)
-        save_user(str(cible_id), cible_data)
+        await save_user(str(challenger_id), challenger_data)
+        await save_user(str(cible_id), cible_data)
 
     try:
         challenger_user = await bot.fetch_user(challenger_id)
@@ -737,7 +724,7 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Profil", style=discord.ButtonStyle.secondary, emoji="💰")
     async def profil(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = get_user(str(interaction.user.id))
+        user = await get_user(str(interaction.user.id))
         tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
         today = now_local().strftime("%Y-%m-%d")
         bonus_statut_dispo = user.get("dernier_bonus_statut") != today
@@ -767,7 +754,7 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Tirage", style=discord.ButtonStyle.primary, emoji="🎲")
     async def tirage(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = get_user(str(interaction.user.id))
+        user = await get_user(str(interaction.user.id))
         tirages_dispo = user.get("tirages", 1) + user.get("tirages_stock", 0)
         embed = discord.Embed(title="🎲 Tirages", color=0xFF8C00)
         embed.description = (
@@ -790,7 +777,7 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Shop", style=discord.ButtonStyle.success, emoji="🏪")
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = get_user(str(interaction.user.id))
+        user = await get_user(str(interaction.user.id))
         embed = discord.Embed(title="🏪 Boutique du Casino", color=0x2ECC71)
         embed.description = (
             f"Tu as **{user['coins']:,} Tokyo Coins** 💰\n\n"
@@ -825,7 +812,7 @@ class MenuPrincipal(discord.ui.View):
 
     @discord.ui.button(label="Classement", style=discord.ButtonStyle.secondary, emoji="🏆")
     async def classement_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
-        db = load_db()
+        db = await load_all_users()
         if not db:
             await interaction.response.send_message("Aucun joueur enregistré.", ephemeral=True)
             return
@@ -860,7 +847,7 @@ class VueTirage(discord.ui.View):
         super().__init__(timeout=60)
 
     async def effectuer_tirages(self, interaction: discord.Interaction, nb: int):
-        user_data = get_user(str(interaction.user.id))
+        user_data = await get_user(str(interaction.user.id))
 
         if est_sabote(user_data):
             await interaction.response.send_message(
@@ -892,7 +879,7 @@ class VueTirage(discord.ui.View):
             user_data, msg, _ = appliquer_gain(user_data, categorie, nom)
             resultats.append(f"**Tirage {i+1}** — {msg}")
 
-        save_user(str(interaction.user.id), user_data)
+        await save_user(str(interaction.user.id), user_data)
 
         tirages_restants = user_data.get("tirages", 0) + user_data.get("tirages_stock", 0)
         embed = discord.Embed(title=f"🎲 Résultats — {nb} tirage(s)", color=0xFF8C00)
@@ -921,7 +908,7 @@ class VueShop(discord.ui.View):
         if prix < 0:
             await interaction.response.send_message("❌ Prix invalide.", ephemeral=True)
             return
-        user_data = get_user(str(interaction.user.id))
+        user_data = await get_user(str(interaction.user.id))
         if user_data["coins"] < prix:
             manque = prix - user_data["coins"]
             await interaction.response.send_message(
@@ -949,7 +936,7 @@ class VueShop(discord.ui.View):
                 )
             except Exception as e:
                 print(f"Erreur MP owner : {e}")
-        save_user(str(interaction.user.id), user_data)
+        await save_user(str(interaction.user.id), user_data)
         await interaction.response.send_message(
             f"✅ Achat réussi !\n{description}\n\n💰 Solde restant : **{user_data['coins']:,} coins**",
             ephemeral=True
@@ -986,9 +973,9 @@ async def admin_coins(interaction: discord.Interaction, membre: discord.Member, 
     if montant <= 0:
         await interaction.response.send_message("❌ Le montant doit être positif.", ephemeral=True)
         return
-    user_data = get_user(str(membre.id))
+    user_data = await get_user(str(membre.id))
     user_data["coins"] += montant
-    save_user(str(membre.id), user_data)
+    await save_user(str(membre.id), user_data)
     await interaction.response.send_message(
         f"✅ **{montant:,} coins** donnés à {membre.display_name}. Solde : **{user_data['coins']:,}**",
         ephemeral=True
@@ -1000,9 +987,9 @@ async def admin_tirages(interaction: discord.Interaction, membre: discord.Member
     if nb <= 0:
         await interaction.response.send_message("❌ Le nombre doit être positif.", ephemeral=True)
         return
-    user_data = get_user(str(membre.id))
+    user_data = await get_user(str(membre.id))
     user_data["tirages_stock"] = user_data.get("tirages_stock", 0) + nb
-    save_user(str(membre.id), user_data)
+    await save_user(str(membre.id), user_data)
     await interaction.response.send_message(
         f"✅ **{nb} tirages** donnés à {membre.display_name} !",
         ephemeral=True
@@ -1011,15 +998,14 @@ async def admin_tirages(interaction: discord.Interaction, membre: discord.Member
 @bot.tree.command(name="tokyo_admin_reset_tirages", description="[ADMIN] Remet les tirages gratuits à 1 pour tout le monde")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def admin_reset(interaction: discord.Interaction):
-    db = load_db()
-    for uid in db:
-        db[uid]["tirages"] = 1
-    save_db(db)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET tirages = 1")
+        await db.commit()
     await interaction.response.send_message("✅ Tirages gratuits remis à 1 pour tout le monde !", ephemeral=True)
 
 @bot.tree.command(name="tokyo_classement", description="🏆 Voir le top 10 des Tokyo Coins (public)")
 async def classement(interaction: discord.Interaction):
-    db = load_db()
+    db = await load_all_users()
     if not db:
         await interaction.response.send_message("Aucun joueur enregistré.", ephemeral=True)
         return
@@ -1047,5 +1033,5 @@ async def classement(interaction: discord.Interaction):
         )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    
+
 bot.run(TOKEN)
